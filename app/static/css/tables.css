@@ -1,0 +1,149 @@
+/* ── Three-line Table (Researchwork / Clinical Standard) ────
+   Aligned with statistical_description table design
+   ─────────────────────────────────────────────────────────── */
+
+.medical-table-container {
+  overflow-x: auto;
+  max-width: 100%;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-xs);
+}
+
+.medical-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-family: var(--font);
+  background: #fff;
+}
+
+.medical-table caption {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--ink-heading);
+  padding: 10px 12px;
+  text-align: left;
+  caption-side: top;
+}
+
+.medical-table thead {
+  border-top: 2px solid #dbe5f2;
+  border-bottom: 2px solid #dbe5f2;
+}
+
+.medical-table thead th {
+  padding: 10px 14px;
+  font-weight: 750;
+  color: #223142;
+  text-align: left;
+  background: #f4f7fb;
+  white-space: nowrap;
+}
+
+.medical-table tbody td {
+  padding: 9px 14px;
+  color: var(--text);
+  border-bottom: 1px solid #eef2f8;
+}
+
+.medical-table tbody tr:nth-child(even) {
+  background: #fafbfd;
+}
+
+.medical-table tbody tr:hover {
+  background: #edf4ff;
+}
+
+.medical-table tbody tr:last-child {
+  border-bottom: 2px solid #dbe5f2;
+}
+
+.medical-table .col-numeric { text-align: right; font-family: var(--font-mono); font-size: 12px; }
+.medical-table .col-pvalue  { text-align: center; font-family: var(--font-mono); font-size: 12px; font-weight: 700; }
+.medical-table .col-method  { font-size: 11px; color: var(--text-muted); text-align: center; }
+
+.medical-table .row-total {
+  font-weight: 750;
+  background: rgba(244, 247, 251, 0.5);
+}
+
+.medical-table .row-variable-header {
+  background: #f4f7fb;
+  font-weight: 750;
+}
+
+/* ── Table export toolbar ───────────────────────────── */
+.table-toolbar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 10px 0;
+}
+
+.table-toolbar .btn {
+  font-size: 12px;
+  min-height: 34px;
+  padding: 5px 14px;
+}
+
+/* ── P-value significance markers ───────────────────── */
+.sig-mark { display: inline-block; margin-left: 2px; font-weight: 800; }
+.sig-star { color: var(--accent-red); }
+.sig-ns   { color: var(--text-muted); font-size: 11px; }
+
+/* ── Three-line variant (statistical_description exact) ── */
+.three-line {
+  width: 100%;
+  min-width: 480px;
+  border-collapse: collapse;
+  background: #fff;
+  font-size: 13px;
+}
+
+.three-line caption {
+  caption-side: bottom;
+  padding-top: 8px;
+  color: var(--muted);
+  text-align: left;
+  font-size: 12px;
+}
+
+.three-line thead {
+  border-bottom: 2px solid #dbe5f2;
+}
+
+.three-line th {
+  background: #f4f7fb;
+  color: #223142;
+  padding: 9px 10px;
+  text-align: left;
+  white-space: nowrap;
+  font-weight: 750;
+  font-size: 13px;
+  border-bottom: 2px solid #dbe5f2;
+}
+
+.three-line td {
+  padding: 8px 10px;
+  color: #223142;
+  vertical-align: middle;
+  border-bottom: 1px solid #eef2f8;
+  font-size: 13px;
+}
+
+.three-line tbody tr:nth-child(even) {
+  background: #fafbfd;
+}
+
+.three-line tbody tr:nth-child(odd) {
+  background: #fff;
+}
+
+.three-line tbody tr:hover {
+  background: #edf4ff;
+}
+
+.three-line tbody tr:last-child td {
+  border-bottom: 2px solid #dbe5f2;
+}
