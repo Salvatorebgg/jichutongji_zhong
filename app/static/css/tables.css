@@ -1,5 +1,5 @@
-/* ── Three-line Table (Researchwork / Clinical Standard) ────
-   Aligned with statistical_description table design
+/* ── Tables — Clinical Statistics Platform ────────────────────
+   Three-line table style, result tables, compact tables
    ─────────────────────────────────────────────────────────── */
 
 .medical-table-container {
@@ -27,35 +27,35 @@
 }
 
 .medical-table thead {
-  border-top: 2px solid #dbe5f2;
-  border-bottom: 2px solid #dbe5f2;
+  border-top: 2px solid var(--border);
+  border-bottom: 2px solid var(--border);
 }
 
 .medical-table thead th {
   padding: 10px 14px;
-  font-weight: 750;
-  color: #223142;
+  font-weight: 700;
+  color: var(--ink-heading);
   text-align: left;
-  background: #f4f7fb;
+  background: var(--bg-soft);
   white-space: nowrap;
 }
 
 .medical-table tbody td {
   padding: 9px 14px;
   color: var(--text);
-  border-bottom: 1px solid #eef2f8;
+  border-bottom: 1px solid var(--border-soft);
 }
 
 .medical-table tbody tr:nth-child(even) {
-  background: #fafbfd;
+  background: var(--bg-soft);
 }
 
 .medical-table tbody tr:hover {
-  background: #edf4ff;
+  background: var(--primary-soft);
 }
 
 .medical-table tbody tr:last-child {
-  border-bottom: 2px solid #dbe5f2;
+  border-bottom: 2px solid var(--border);
 }
 
 .medical-table .col-numeric { text-align: right; font-family: var(--font-mono); font-size: 12px; }
@@ -63,13 +63,13 @@
 .medical-table .col-method  { font-size: 11px; color: var(--text-muted); text-align: center; }
 
 .medical-table .row-total {
-  font-weight: 750;
-  background: rgba(244, 247, 251, 0.5);
+  font-weight: 700;
+  background: rgba(247,250,249,0.5);
 }
 
 .medical-table .row-variable-header {
-  background: #f4f7fb;
-  font-weight: 750;
+  background: var(--bg-soft);
+  font-weight: 700;
 }
 
 /* ── Table export toolbar ───────────────────────────── */
@@ -92,7 +92,7 @@
 .sig-star { color: var(--accent-red); }
 .sig-ns   { color: var(--text-muted); font-size: 11px; }
 
-/* ── Three-line variant (statistical_description exact) ── */
+/* ── Three-line variant ─────────────────────────────── */
 .three-line {
   width: 100%;
   min-width: 480px;
@@ -104,36 +104,36 @@
 .three-line caption {
   caption-side: bottom;
   padding-top: 8px;
-  color: var(--muted);
+  color: var(--text-muted);
   text-align: left;
   font-size: 12px;
 }
 
 .three-line thead {
-  border-bottom: 2px solid #dbe5f2;
+  border-bottom: 2px solid var(--border);
 }
 
 .three-line th {
-  background: #f4f7fb;
-  color: #223142;
+  background: var(--bg-soft);
+  color: var(--ink-heading);
   padding: 9px 10px;
   text-align: left;
   white-space: nowrap;
-  font-weight: 750;
+  font-weight: 700;
   font-size: 13px;
-  border-bottom: 2px solid #dbe5f2;
+  border-bottom: 2px solid var(--border);
 }
 
 .three-line td {
   padding: 8px 10px;
-  color: #223142;
+  color: var(--ink);
   vertical-align: middle;
-  border-bottom: 1px solid #eef2f8;
+  border-bottom: 1px solid var(--border-soft);
   font-size: 13px;
 }
 
 .three-line tbody tr:nth-child(even) {
-  background: #fafbfd;
+  background: var(--bg-soft);
 }
 
 .three-line tbody tr:nth-child(odd) {
@@ -141,9 +141,81 @@
 }
 
 .three-line tbody tr:hover {
-  background: #edf4ff;
+  background: var(--primary-soft);
 }
 
 .three-line tbody tr:last-child td {
-  border-bottom: 2px solid #dbe5f2;
+  border-bottom: 2px solid var(--border);
+}
+
+/* ── Result Tables ──────────────────────────────────── */
+.result-table-wrap {
+  margin: 12px 0;
+}
+
+.result-table-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink-heading);
+  margin-bottom: 8px;
+}
+
+.compact-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  background: var(--bg-surface);
+}
+
+.compact-table thead th {
+  background: var(--bg-soft);
+  color: var(--ink-heading);
+  font-weight: 700;
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 2px solid var(--border);
+  white-space: nowrap;
+}
+
+.compact-table tbody td {
+  padding: 8px 14px;
+  color: var(--text);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.compact-table tbody tr:last-child td {
+  border-bottom: 2px solid var(--border);
+}
+
+.compact-table tbody tr:hover td {
+  background: var(--primary-soft);
+}
+
+/* ── Post-hoc / Group stats tables ──────────────────── */
+.post-hoc-table,
+.group-stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-top: 12px;
+}
+
+.post-hoc-table th,
+.group-stats-table th {
+  background: var(--bg-soft);
+  padding: 8px 12px;
+  text-align: left;
+  font-weight: 700;
+  border-bottom: 2px solid var(--border);
+}
+
+.post-hoc-table td,
+.group-stats-table td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.post-hoc-table .sig-row {
+  font-weight: 700;
+  color: var(--accent-teal);
 }

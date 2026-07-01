@@ -1,66 +1,62 @@
 /* ═══════════════════════════════════════════════════════════
-   Theme — Clinical Statistics Platform (aligned with statistical_description)
-   Blue-based palette: researchwork design system
+   Theme — Clinical Statistics Platform
+   Teal/navy/amber palette — aligned with mlhigh_zhong design
    ═══════════════════════════════════════════════════════════ */
 
 :root {
   /* —— Primary palette —— */
-  --blue: #3f73c8;
-  --blue-strong: #2f62b2;
-  --blue-soft: #edf4ff;
-  --blue-gradient: linear-gradient(135deg, #2d8cff 0%, #145fe8 100%);
-  --primary: #3f73c8;
-  --primary-hover: #2f62b2;
-  --primary-light: #edf4ff;
-  --primary-soft: #f4f7fb;
+  --primary: #0d4f4b;
+  --primary-hover: #0a3d3a;
+  --primary-light: #e8f4f3;
+  --primary-soft: #f2f9f8;
 
   /* —— Ink / Text —— */
-  --ink: #223142;
-  --ink-heading: #1a2b3c;
-  --text: #334155;
-  --text-muted: #6f7f90;
-  --text-soft: #8b9aad;
+  --ink: #1a2629;
+  --ink-heading: #0f1e22;
+  --text: #36454a;
+  --text-muted: #6b7e84;
+  --text-soft: #8d9da3;
 
   /* —— Accent —— */
-  --accent-teal: #3f73c8;
-  --accent-navy: #2b4c6f;
+  --accent-teal: #0E7C7B;
+  --accent-navy: #274C77;
   --accent-orange: #e06830;
-  --accent-red: #c0616e;
-  --accent-amber: #c8922a;
+  --accent-red: #B34D3E;
+  --accent-amber: #C58725;
   --accent-violet: #665C9E;
   --accent-mint: #55998b;
 
   /* —— Background —— */
-  --bg-root: #f5f7fb;
+  --bg-root: #f5f8f7;
   --bg-surface: #ffffff;
-  --bg-soft: #f4f6f9;
+  --bg-soft: #f7faf9;
   --bg-warm: #fefaf6;
   --bg-card: #ffffff;
-  --bg-card-hover: #fafbfd;
+  --bg-card-hover: #fafcfb;
 
   /* —— Border —— */
-  --border: #dbe5f2;
-  --border-soft: #e8edf5;
-  --border-active: #b8cce6;
-  --border-focus: #3f73c8;
+  --border: #dfe8e5;
+  --border-soft: #e8efec;
+  --border-active: #b8cec7;
+  --border-focus: #55998b;
 
   /* —— States —— */
   --success: #3d8b7e;
   --success-bg: #edf6f4;
   --warning: #c5741a;
   --warning-bg: #fff8f0;
-  --error: #c0616e;
+  --error: #B34D3E;
   --error-bg: #fef5f4;
-  --info: #3f73c8;
-  --info-bg: #edf4ff;
+  --info: #3d7aab;
+  --info-bg: #eef6fb;
 
-  /* —— Shadows (blue-tinted) —— */
-  --shadow-xs: 0 1px 4px rgba(42, 77, 125, 0.04);
-  --shadow-sm: 0 4px 14px rgba(42, 77, 125, 0.06);
-  --shadow-md: 0 8px 28px rgba(42, 77, 125, 0.08);
-  --shadow-lg: 0 16px 48px rgba(42, 77, 125, 0.10);
-  --shadow-xl: 0 24px 64px rgba(42, 77, 125, 0.12);
-  --shadow-glow: 0 0 0 3px rgba(63, 115, 200, 0.12);
+  /* —— Shadows (green-tinted) —— */
+  --shadow-xs: 0 1px 4px rgba(60,80,70,0.05);
+  --shadow-sm: 0 4px 14px rgba(50,70,62,0.07);
+  --shadow-md: 0 8px 28px rgba(50,70,62,0.09);
+  --shadow-lg: 0 16px 48px rgba(50,70,62,0.12);
+  --shadow-xl: 0 24px 64px rgba(50,70,62,0.14);
+  --shadow-glow: 0 0 0 3px rgba(14,124,123,0.12);
 
   /* —— Radius —— */
   --radius-sm: 8px;
@@ -71,8 +67,8 @@
   --radius-full: 9999px;
 
   /* —— Fonts —— */
-  --font: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
-  --font-display: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font: 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', system-ui, -apple-system, sans-serif;
+  --font-display: 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif;
   --font-mono: 'JetBrains Mono', 'Consolas', 'Monaco', monospace;
 
   /* —— Motion —— */
@@ -100,7 +96,7 @@ html {
 
 body {
   min-height: 100vh;
-  background: #f5f7fb;
+  background: linear-gradient(175deg, #f3f7f5 0%, #f7faf8 30%, #f5f8f6 100%);
   font-family: var(--font);
   color: var(--ink);
   line-height: 1.6;
@@ -135,14 +131,14 @@ body {
 
 @keyframes gentlePulse {
   0%, 100% { box-shadow: var(--shadow-glow); }
-  50%      { box-shadow: 0 0 0 6px rgba(63, 115, 200, 0.06); }
+  50%      { box-shadow: 0 0 0 6px rgba(14,124,123,0.06); }
 }
 
 /* ── Scrollbar ───────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: rgba(200, 210, 220, 0.25); border-radius: 10px; }
-::-webkit-scrollbar-thumb { background: #b0bec8; border-radius: 10px; }
-::-webkit-scrollbar-thumb:hover { background: #8f9fad; }
+::-webkit-scrollbar-track { background: rgba(200,215,210,0.25); border-radius: 10px; }
+::-webkit-scrollbar-thumb { background: #b0c8bf; border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: #8fada3; }
 
 /* ── Selection ───────────────────────────────────────────── */
-::selection { background: rgba(63, 115, 200, 0.15); color: var(--ink); }
+::selection { background: rgba(14,124,123,0.15); color: var(--ink); }

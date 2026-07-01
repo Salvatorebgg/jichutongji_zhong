@@ -35,6 +35,8 @@ if (typeof STATE === 'undefined') {
     lineWidth: 2.5,
     postHocMethod: null,
     methodAvailability: {},
+    methodParams: {},         // Active method parameters (key -> value)
+    methodParamsCatalog: {},  // Parameter definitions for all test types
     chartWorkspaces: {},
     chinaGeoJSON: null,
     chinaCentroids: null,

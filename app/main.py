@@ -60,6 +60,8 @@ from app.services.export_service import (
     export_to_html_table,
 )
 from app.services.sample_service import EXAMPLE_MAKERS
+from app.services.params_catalog import get_test_params, get_all_test_params
+import re
 
 # Ensure dirs exist
 for d in [STATIC_DIR, EXAMPLES_DIR, UPLOADS_DIR, OUTPUTS_DIR]:
@@ -206,7 +208,235 @@ def download_example(name: str) -> FileResponse:
     return FileResponse(filepath, media_type="text/csv", filename=f"{name}.csv")
 
 
-@app.post("/api/dataset/data")
+# ── Test Parameter Definitions ────────────────────────────────
+
+
+@app.get("/api/test-params")
+def list_test_params() -> dict:
+    """Return parameter definitions for all test types."""
+    return {"test_params": get_all_test_params()}
+
+
+@app.get("/api/test-params/{test_type}")
+def get_test_param(test_type: str) -> dict:
+    """Return parameter definitions for a specific test type."""
+    params = get_test_params(test_type)
+    if not params:
+        return {"test_type": test_type, "params": []}
+    return {"test_type": test_type, "params": params}
+
+
+# ── Auto-Recommend Roles ──────────────────────────────────────
+
+
+def _is_id_like_col(col: str) -> bool:
+    return bool(re.search(r"(^id$|_id$|id_|subject|patient|sample|编号)", str(col), flags=re.I))
+
+
+def _is_numeric_col(df: pd.DataFrame, col: str) -> bool:
+    return col in df.columns and pd.api.types.is_numeric_dtype(df[col])
+
+
+def _is_discrete_col(df: pd.DataFrame, col: str) -> bool:
+    if col not in df.columns: return False
+    s = df[col].dropna()
+    if s.empty: return False
+    u = int(s.nunique())
+    if u < 2 or u > 30: return False
+    return True
+
+
+@app.post("/api/recommend-roles")
+def recommend_roles(req: dict) -> dict:
+    """Auto-recommend research vars, covars, and outcomes for a method."""
+    method_id = str(req.get("method_id", ""))
+    df = _get_df_simple(req)
+    try:
+        var_types = classify_variables(df.copy())
+    except Exception:
+        var_types = {}
+
+    def dedupe(values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values:
+            if value in df.columns and value not in seen:
+                result.append(value)
+                seen.add(value)
+        return result
+
+    id_cols = [c for c in df.columns if _is_id_like_col(c)]
+    all_cols = [c for c in df.columns if c not in id_cols]
+    numeric = [c for c in all_cols if _is_numeric_col(df, c) and df[c].nunique(dropna=True) > 1]
+    numeric_cont = dedupe((var_types.get("continuous") or []) + [c for c in numeric if df[c].nunique(dropna=True) > 10])
+    discrete = [c for c in all_cols if _is_discrete_col(df, c)]
+    binary = [c for c in discrete if int(df[c].dropna().nunique()) == 2]
+    group_candidates = dedupe((var_types.get("group") or []) + [c for c in discrete if re.search(r"group|treat|arm|sex|gender|class|type|分组|组别|性别|分类", str(c), re.I)] + discrete)
+    outcome_candidates = dedupe((var_types.get("outcome_candidate") or []) + [c for c in all_cols if re.search(r"outcome|response|target|label|score|event|death|status|disease|diagnosis|结局|响应|标签|评分|事件|死亡|疾病|诊断", str(c), re.I)])
+    subject_candidates = dedupe(id_cols + [c for c in df.columns if re.search(r"subject|patient|sample|record|id|编号|受试", str(c), re.I)])
+
+    def exclude(pool: list[str], values: list[str] | tuple[str, ...]) -> list[str]:
+        blocked = {v for v in values if v}
+        return [c for c in pool if c not in blocked]
+
+    def pick(pattern: str, pool: list[str], pred=None, fallback: bool = True) -> str:
+        rgx = re.compile(pattern, re.I)
+        for c in pool:
+            if rgx.search(str(c)) and (pred is None or pred(c)):
+                return c
+        return pool[0] if fallback and pool else ""
+
+    def choose_group(excluded: list[str] | tuple[str, ...] = (), require_binary: bool = False) -> str:
+        pool = exclude(group_candidates, excluded)
+        if require_binary:
+            # For methods that require exactly 2 groups (t-test, Mann-Whitney),
+            # restrict to columns with exactly 2 unique non-null values
+            pool = [c for c in pool if int(df[c].dropna().nunique()) == 2]
+        if not pool:
+            return ""
+        return pick(r"group|treat|arm|sex|gender|class|type|分组|组别|性别|分类", pool) or pool[0]
+
+    def choose_linear_outcome() -> str:
+        pool = dedupe(
+            [c for c in outcome_candidates if c in numeric_cont]
+            + numeric_cont
+            + [c for c in numeric if c not in binary]
+            + numeric
+        )
+        return pick(r"outcome|response|score|value|bmi|sbp|dbp|glucose|cholesterol|指标|评分|结局|响应", pool)
+
+    def choose_binary_outcome() -> str:
+        preferred = [c for c in binary if re.search(r"outcome|response|target|label|event|death|status|disease|diagnosis|结局|响应|标签|事件|死亡|疾病|诊断", str(c), re.I)]
+        fallback = [c for c in binary if not re.search(r"sex|gender|group|treat|arm|分组|组别|性别", str(c), re.I)]
+        return (dedupe(preferred + fallback + binary) or [""])[0]
+
+    def choose_predictors(outcome: str, max_count: int, numeric_only: bool = False) -> list[str]:
+        if numeric_only:
+            pool = exclude(numeric, (outcome,))
+        else:
+            low_card = [c for c in discrete if c != outcome and c not in id_cols]
+            pool = dedupe(exclude(numeric, (outcome,)) + low_card)
+        preferred = [c for c in pool if not re.search(r"outcome|target|label|event|death|status|结局|标签|事件|死亡", str(c), re.I)]
+        return dedupe(preferred + pool)[:max_count]
+
+    roles = {"research_vars": [], "covar_vars": [], "outcome_vars": []}
+    params = {}
+
+    if method_id in ("t_test_independent", "levene_test", "anova", "mann_whitney", "kruskal_wallis"):
+        # t_test and mann_whitney require exactly 2 groups → restrict to binary columns
+        need_binary = method_id in ("t_test_independent", "mann_whitney")
+        grp = choose_group(require_binary=need_binary)
+        out = choose_linear_outcome()
+        roles = {"research_vars": [grp] if grp else [], "covar_vars": [], "outcome_vars": [out] if out else []}
+        if method_id == "t_test_independent":
+            params["equal_var"] = "False"
+        if method_id == "anova" and grp and df[grp].nunique(dropna=True) >= 3:
+            params["post_hoc"] = "tukey"
+        if method_id == "kruskal_wallis" and grp and df[grp].nunique(dropna=True) >= 3:
+            params["post_hoc"] = "bonferroni"
+    elif method_id in ("t_test_paired", "wilcoxon_signed_rank"):
+        pre = pick(r"before|pre|baseline|visit1|time1|前|基线", numeric)
+        post = pick(r"after|post|followup|visit2|time2|后|随访", exclude(numeric, (pre,)))
+        if not pre and not post:
+            pre = numeric[0] if len(numeric) > 0 else ""
+            post = numeric[1] if len(numeric) > 1 else ""
+        roles = {"research_vars": [], "covar_vars": [], "outcome_vars": [pre, post] if pre and post else []}
+    elif method_id in ("one_sample_t_test", "normality_test"):
+        out = choose_linear_outcome()
+        roles = {"research_vars": [], "covar_vars": [], "outcome_vars": [out] if out else []}
+    elif method_id in ("chi_square", "fisher_exact"):
+        outcome_pool = dedupe(outcome_candidates + discrete)
+        dv1 = pick(r"outcome|event|death|status|disease|diagnosis|结局|事件|死亡|疾病|诊断", outcome_pool)
+        dv2 = choose_group((dv1,)) or (exclude(discrete, (dv1,))[0] if len(exclude(discrete, (dv1,))) else "")
+        roles = {"research_vars": [dv2] if dv2 else [], "covar_vars": [], "outcome_vars": [dv1] if dv1 else []}
+        params["correction"] = "auto"
+    elif method_id == "mcnemar":
+        pre = pick(r"before|pre|baseline|old|test1|前|基线", discrete)
+        post = pick(r"after|post|followup|new|test2|后|随访", exclude(discrete, (pre,)))
+        if not pre or not post:
+            pre = discrete[0] if len(discrete) > 0 else ""
+            post = discrete[1] if len(discrete) > 1 else ""
+        roles = {"research_vars": [], "covar_vars": [], "outcome_vars": [pre, post] if pre and post else []}
+    elif method_id in ("pearson_correlation", "spearman_correlation"):
+        x1 = numeric[0] if len(numeric) > 0 else ""
+        x2 = numeric[1] if len(numeric) > 1 else ""
+        roles = {"research_vars": [], "covar_vars": [], "outcome_vars": [x1, x2] if x1 and x2 else []}
+    elif method_id == "log_rank":
+        tm = pick(r"time|survival|duration|follow|days|months|时间|生存|随访|天|月", numeric) or (numeric[0] if numeric else "")
+        ev = pick(r"event|death|status|outcome|dead|failure|事件|死亡|结局", binary) or (binary[0] if binary else "")
+        grp = choose_group((tm, ev)) or (exclude(binary, (ev, tm))[0] if exclude(binary, (ev, tm)) else "")
+        roles = {"research_vars": [grp, tm] if grp and tm else ([grp] if grp else []), "covar_vars": [], "outcome_vars": [ev] if ev else []}
+    elif method_id in ("logistic_regression", "linear_regression"):
+        out = choose_binary_outcome() if method_id == "logistic_regression" else choose_linear_outcome()
+        xvars = choose_predictors(out, 6, numeric_only=False)
+        roles = {"research_vars": xvars, "covar_vars": [], "outcome_vars": [out] if out else []}
+        if method_id == "logistic_regression":
+            params.update({"max_iter": 2000, "C": 1.0})
+    elif method_id in ("discriminant_analysis", "quadratic_discriminant_analysis"):
+        grp = pick(r"group|disease|diagnosis|class|type|outcome|分组|疾病|诊断|分类|结局", dedupe(outcome_candidates + group_candidates + discrete)) or (discrete[0] if discrete else "")
+        xvars = choose_predictors(grp, 6, numeric_only=True)
+        roles = {"research_vars": xvars, "covar_vars": [], "outcome_vars": [grp] if grp else []}
+        params["cv_folds"] = "5"
+        if method_id == "quadratic_discriminant_analysis":
+            params["reg_param"] = 0.2
+    elif method_id == "ancova":
+        out = choose_linear_outcome()
+        grp = choose_group((out,))
+        cov = exclude(numeric, (out, grp))[:1]
+        roles = {"research_vars": [grp] if grp else [], "covar_vars": cov, "outcome_vars": [out] if out else []}
+    elif method_id in ("repeated_measures_anova", "friedman"):
+        out = choose_linear_outcome()
+        subj = pick(r"subject|patient|sample|record|id|受试|编号", subject_candidates)
+        grp = pick(r"time|timepoint|period|visit|wave|week|month|时间|周期|访视|阶段", exclude(all_cols, (out, subj))) or (exclude(discrete, (out, subj))[0] if exclude(discrete, (out, subj)) else "")
+        roles = {"research_vars": [grp] if grp else [], "covar_vars": [subj] if subj else [], "outcome_vars": [out] if out else []}
+
+    for key in roles:
+        roles[key] = dedupe([c for c in roles[key] if c in df.columns])
+
+    def is_available() -> bool:
+        research = roles.get("research_vars") or []
+        covars = roles.get("covar_vars") or []
+        outcomes = roles.get("outcome_vars") or []
+        if method_id in ("t_test_independent", "levene_test", "anova", "mann_whitney", "kruskal_wallis", "ancova"):
+            if not research or not outcomes:
+                return False
+            if method_id == "ancova" and not covars:
+                return False
+            # t_test_independent and mann_whitney require exactly 2 groups
+            if method_id in ("t_test_independent", "mann_whitney"):
+                grp_col = research[0]
+                if grp_col not in df.columns:
+                    return False
+                n_groups = int(df[grp_col].dropna().nunique())
+                if n_groups != 2:
+                    return False
+            return True
+        if method_id in ("t_test_paired", "wilcoxon_signed_rank", "mcnemar", "pearson_correlation", "spearman_correlation"):
+            return len(outcomes) >= 2
+        if method_id in ("one_sample_t_test", "normality_test"):
+            return bool(outcomes)
+        if method_id in ("chi_square", "fisher_exact"):
+            return bool(research and outcomes)
+        if method_id == "log_rank":
+            return len(research) >= 2 and bool(outcomes)
+        if method_id in ("logistic_regression", "linear_regression", "discriminant_analysis", "quadratic_discriminant_analysis"):
+            return bool(research and outcomes)
+        if method_id in ("repeated_measures_anova", "friedman"):
+            return bool(research and covars and outcomes)
+        return bool(outcomes)
+
+    available = is_available()
+
+    return {
+        "method_id": method_id,
+        "available": available,
+        "reason": "" if available else "未找到满足当前统计方法的变量组合，请检查变量类型、分组数、结局变量和样本量。",
+        "roles": roles,
+        "params": params,
+    }
+
+
+# ── Dataset Data ───────────────────────────────────────────
 def dataset_data(req: dict) -> dict:
     df = _get_df_simple(req)
     var_types = classify_variables(df.copy())
@@ -236,6 +466,7 @@ def run_analysis(req: AnalyzeRequest) -> dict:
     group_var = req.group_var
     paired_var = req.paired_var
     post_hoc = req.post_hoc
+    method_params = req.params or {}
 
     if not var or var not in df.columns:
         if test_type not in ("logistic_regression", "linear_regression", "ancova", "log_rank"):
@@ -246,28 +477,28 @@ def run_analysis(req: AnalyzeRequest) -> dict:
         if test_type == "t_test_independent":
             if not group_var or group_var not in df.columns:
                 raise HTTPException(status_code=400, detail="Independent t-test requires a group variable")
-            result = t_test_independent(df, var, group_var)
+            result = t_test_independent(df, var, group_var, method_params)
 
         elif test_type == "t_test_paired":
             if not paired_var or paired_var not in df.columns:
                 raise HTTPException(status_code=400, detail="Paired t-test requires a paired variable")
-            result = t_test_paired(df, var, paired_var)
+            result = t_test_paired(df, var, paired_var, method_params)
 
         elif test_type == "one_sample_t_test":
-            result = one_sample_t_test(df, var)
+            result = one_sample_t_test(df, var, method_params=method_params)
 
         elif test_type == "normality_test":
-            result = normality_test(df, var)
+            result = normality_test(df, var, method_params)
 
         elif test_type == "levene_test":
             if not group_var or group_var not in df.columns:
                 raise HTTPException(status_code=400, detail="Levene test requires a group variable")
-            result = levene_variance_test(df, var, group_var)
+            result = levene_variance_test(df, var, group_var, method_params)
 
         elif test_type == "anova":
             if not group_var or group_var not in df.columns:
                 raise HTTPException(status_code=400, detail="ANOVA requires a group variable")
-            result = anova_oneway(df, var, group_var, post_hoc)
+            result = anova_oneway(df, var, group_var, post_hoc, method_params)
 
         elif test_type == "repeated_measures_anova":
             if not group_var or group_var not in df.columns:
@@ -280,7 +511,7 @@ def run_analysis(req: AnalyzeRequest) -> dict:
                     subject_var = subject_candidates[0]
                 else:
                     raise HTTPException(status_code=400, detail="Repeated measures ANOVA requires a subject variable")
-            result = repeated_measures_anova(df, var, subject_var, group_var)
+            result = repeated_measures_anova(df, var, subject_var, group_var, method_params=method_params)
 
         elif test_type == "ancova":
             if not group_var or group_var not in df.columns:
@@ -288,23 +519,23 @@ def run_analysis(req: AnalyzeRequest) -> dict:
             covar = getattr(req, "covar", "")
             if not covar or covar not in df.columns:
                 raise HTTPException(status_code=400, detail="ANCOVA requires a covariate variable")
-            result = ancova(df, var, group_var, covar)
+            result = ancova(df, var, group_var, covar, method_params)
 
         # ── Non-parametric Tests ──
         elif test_type == "mann_whitney":
             if not group_var or group_var not in df.columns:
                 raise HTTPException(status_code=400, detail="Mann-Whitney U test requires a group variable")
-            result = mann_whitney_u_test(df, var, group_var)
+            result = mann_whitney_u_test(df, var, group_var, method_params)
 
         elif test_type == "kruskal_wallis":
             if not group_var or group_var not in df.columns:
                 raise HTTPException(status_code=400, detail="Kruskal-Wallis test requires a group variable")
-            result = kruskal_wallis_test(df, var, group_var, post_hoc)
+            result = kruskal_wallis_test(df, var, group_var, post_hoc, method_params)
 
         elif test_type == "wilcoxon_signed_rank":
             if not paired_var or paired_var not in df.columns:
                 raise HTTPException(status_code=400, detail="Wilcoxon signed-rank test requires a paired variable")
-            result = wilcoxon_signed_rank_test(df, var, paired_var)
+            result = wilcoxon_signed_rank_test(df, var, paired_var, method_params)
 
         elif test_type == "friedman":
             if not group_var or group_var not in df.columns:
@@ -316,36 +547,36 @@ def run_analysis(req: AnalyzeRequest) -> dict:
                     subject_var = subject_candidates[0]
                 else:
                     raise HTTPException(status_code=400, detail="Friedman test requires a subject variable")
-            result = friedman_test(df, var, subject_var, group_var)
+            result = friedman_test(df, var, subject_var, group_var, method_params)
 
         # ── Categorical Tests ──
         elif test_type == "chi_square":
             if not group_var or group_var not in df.columns:
                 raise HTTPException(status_code=400, detail="Chi-square test requires a group variable")
-            result = chi_square_test(df, var, group_var)
+            result = chi_square_test(df, var, group_var, method_params)
 
         elif test_type == "fisher_exact":
             if not group_var or group_var not in df.columns:
                 raise HTTPException(status_code=400, detail="Fisher's exact test requires a group variable")
-            result = fisher_exact_test(df, var, group_var)
+            result = fisher_exact_test(df, var, group_var, method_params)
 
         elif test_type == "mcnemar":
             if not paired_var or paired_var not in df.columns:
                 raise HTTPException(status_code=400, detail="McNemar test requires a paired variable")
-            result = mcnemar_test(df, var, paired_var)
+            result = mcnemar_test(df, var, paired_var, method_params=method_params)
 
         # ── Correlation ──
         elif test_type == "pearson_correlation":
             var2 = getattr(req, "var2", paired_var) or paired_var or ""
             if not var2 or var2 not in df.columns:
                 raise HTTPException(status_code=400, detail="Pearson correlation requires a second variable")
-            result = pearson_correlation(df, var, var2)
+            result = pearson_correlation(df, var, var2, method_params)
 
         elif test_type == "spearman_correlation":
             var2 = getattr(req, "var2", paired_var) or paired_var or ""
             if not var2 or var2 not in df.columns:
                 raise HTTPException(status_code=400, detail="Spearman correlation requires a second variable")
-            result = spearman_correlation(df, var, var2)
+            result = spearman_correlation(df, var, var2, method_params)
 
         # ── Survival ──
         elif test_type == "log_rank":
@@ -357,7 +588,7 @@ def run_analysis(req: AnalyzeRequest) -> dict:
                 raise HTTPException(status_code=400, detail="Log-rank test requires a time variable")
             if not event_var or event_var not in df.columns:
                 raise HTTPException(status_code=400, detail="Log-rank test requires an event variable")
-            result = log_rank_test(df, time_var, event_var, group_var)
+            result = log_rank_test(df, time_var, event_var, group_var, method_params)
 
         # ── Regression ──
         elif test_type == "logistic_regression":
@@ -368,7 +599,7 @@ def run_analysis(req: AnalyzeRequest) -> dict:
                 predictor_vars = num_cols[:5]
             if not predictor_vars:
                 raise HTTPException(status_code=400, detail="Logistic regression requires predictor variables")
-            result = logistic_regression(df, var, predictor_vars)
+            result = logistic_regression(df, var, predictor_vars, method_params)
 
         elif test_type == "linear_regression":
             x_vars = getattr(req, "x_vars", None) or getattr(req, "predictor_vars", None) or []
@@ -377,7 +608,7 @@ def run_analysis(req: AnalyzeRequest) -> dict:
                 x_vars = num_cols[:5]
             if not x_vars:
                 raise HTTPException(status_code=400, detail="Linear regression requires predictor variables")
-            result = linear_regression(df, var, x_vars)
+            result = linear_regression(df, var, x_vars, method_params)
 
         elif test_type in ("discriminant_analysis", "quadratic_discriminant_analysis"):
             predictor_vars = getattr(req, "predictor_vars", None) or getattr(req, "x_vars", None) or []
@@ -386,7 +617,7 @@ def run_analysis(req: AnalyzeRequest) -> dict:
             if not predictor_vars:
                 raise HTTPException(status_code=400, detail="Discriminant analysis requires predictor variables")
             method = "qda" if test_type == "quadratic_discriminant_analysis" else "lda"
-            result = discriminant_analysis(df, var, predictor_vars, method=method)
+            result = discriminant_analysis(df, var, predictor_vars, method=method, method_params=method_params)
 
         else:
             raise HTTPException(status_code=400, detail=f"Unknown test type: {test_type}")

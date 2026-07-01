@@ -1,69 +1,45 @@
 /* ── File Upload Module ────────────────────────────────── */
 
-function initUpload() {
-  // No-op: upload initialized in app.js initFileInputs()
-}
+var _uploadAbortController = null;
 
-let _uploadAbortController = null;
-
-async function handleFile(file, options = {}) {
-  const uploadBtn = el('uploadDataBtn');
-
-  // Cancel any in-flight upload
-  if (_uploadAbortController) {
-    _uploadAbortController.abort();
-  }
+async function handleFile(file, options) {
+  options = options || {};
+  var uploadBtn = dom('uploadDataBtn');
+  if (_uploadAbortController) _uploadAbortController.abort();
   _uploadAbortController = new AbortController();
-  const timeoutId = setTimeout(() => _uploadAbortController.abort(), 120000); // 2 min timeout
+  var timeoutId = setTimeout(function() { _uploadAbortController.abort(); }, 120000);
 
-  if (typeof setStatus === 'function') setStatus('正在读取文件...');
-  if (uploadBtn) setLoading(uploadBtn, true);
+  if (uploadBtn) { uploadBtn.disabled = true; uploadBtn.textContent = '读取中...'; }
 
-  const formData = new FormData();
+  var formData = new FormData();
   formData.append('file', file);
 
   try {
-    if (options.fromChart) toast(`正在读取 ${file.name}...`, 'info');
-
-    const res = await fetch('/api/upload', {
-      method: 'POST',
-      body: formData,
-      signal: _uploadAbortController.signal,
-    });
+    if (options.fromChart) showToast('正在读取 ' + file.name + '...', 'info');
+    var res = await fetch('/api/upload', { method: 'POST', body: formData, signal: _uploadAbortController.signal });
     clearTimeout(timeoutId);
-
     if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: 'Upload failed' }));
-      throw new Error(err.detail || `HTTP ${res.status}`);
+      var err = await res.json().catch(function() { return { detail: 'Upload failed' }; });
+      throw new Error(err.detail || 'HTTP ' + res.status);
     }
-    const data = await res.json();
+    var data = await res.json();
     updateStateFromData(data);
     STATE.datasetName = null;
-
-    if (typeof setStatus === 'function') setStatus(`文件 "${data.filename}" 已解析`);
-    if (typeof setWorkflowHint === 'function') setWorkflowHint('数据上传成功！请先查看右侧数据预览，然后点击下一步');
 
     if (data.sheet_names && data.sheet_names.length > 1) {
       renderSheetSelector(data.sheet_names);
     }
-
-    // Update UI panels
-    if (typeof updateMetricGrid === 'function') updateMetricGrid();
-    if (typeof updatePreviewTable === 'function') updatePreviewTable();
-    if (typeof updateDatasetMeta === 'function') updateDatasetMeta();
-    if (typeof updateDownloadList === 'function') updateDownloadList();
-    if (typeof buildVarControls === 'function') buildVarControls();
-    if (typeof renderAppearanceControls === 'function') renderAppearanceControls();
-    if (typeof updateWorkflowButtons === 'function') updateWorkflowButtons();
-    if (typeof activateWsTab === 'function') activateWsTab('preview');
-    else if (typeof activateWorkspaceTab === 'function') activateWorkspaceTab('preview');
+    updatePreviewTableFromState();
+    if (typeof autoRecommendCurrentRoles === 'function') {
+      autoRecommendCurrentRoles({ quiet: true, render: typeof APP !== 'undefined' && APP.activeStep === 'variables' });
+    }
+    showToast('文件 "' + data.filename + '" 已加载', 'success');
   } catch (err) {
     clearTimeout(timeoutId);
-    const msg = err.name === 'AbortError' ? '上传超时，请尝试较小的文件' : '上传失败: ' + err.message;
-    if (typeof setStatus === 'function') setStatus(msg, true);
-    toast(msg, 'error');
+    var msg = err.name === 'AbortError' ? '上传超时' : '上传失败: ' + err.message;
+    showToast(msg, 'error');
   } finally {
-    if (uploadBtn) setLoading(uploadBtn, false);
+    if (uploadBtn) { uploadBtn.disabled = false; uploadBtn.textContent = '选择文件'; }
     _uploadAbortController = null;
   }
 }
@@ -81,79 +57,155 @@ function updateStateFromData(data) {
   STATE.colCount = data.col_count;
   STATE.previewRows = data.preview || [];
   STATE.summary = data.summary || {};
-  saveActiveChartWorkspace();
 }
 
 function renderSheetSelector(sheets) {
-  const sheetRow = el('sheetRow');
+  var sheetRow = dom('sheetRow');
   if (!sheetRow) return;
   sheetRow.hidden = false;
-  const sheetSelect = el('sheetSelect');
+  var sheetSelect = dom('sheetSelect');
   if (!sheetSelect) return;
-  sheetSelect.innerHTML = sheets.map(s => `<option value="${s}">${s}</option>`).join('');
+  sheetSelect.innerHTML = sheets.map(function(s) { return '<option value="' + s + '">' + s + '</option>'; }).join('');
   sheetSelect.value = STATE.activeSheet || sheets[0];
-
-  // Bind change handler
-  const newSelect = sheetSelect.cloneNode(true);
+  var newSelect = sheetSelect.cloneNode(true);
   sheetSelect.parentNode.replaceChild(newSelect, sheetSelect);
-  newSelect.addEventListener('change', async () => {
-    const sheet = newSelect.value;
-    if (typeof setStatus === 'function') setStatus('切换工作表中...');
+  newSelect.addEventListener('change', async function() {
+    var sheet = newSelect.value;
     try {
-      const data = await apiPost('/api/read-sheet', { upload_id: STATE.uploadId, sheet_name: sheet });
-      updateStateFromData({ ...data, sheet_name: sheet, filename: STATE.fileName, file_type: STATE.fileType, sheet_names: STATE.sheetNames });
-      if (typeof updateMetricGrid === 'function') updateMetricGrid();
-      if (typeof updatePreviewTable === 'function') updatePreviewTable();
-      if (typeof buildVarControls === 'function') buildVarControls();
-      if (typeof renderAppearanceControls === 'function') renderAppearanceControls();
-      if (typeof updateWorkflowButtons === 'function') updateWorkflowButtons();
-      toast(`已切换到工作表: ${sheet}`, 'success');
+      var data2 = await apiPost('/api/read-sheet', { upload_id: STATE.uploadId, sheet_name: sheet });
+      updateStateFromData(Object.assign({}, data2, { sheet_name: sheet, filename: STATE.fileName, file_type: STATE.fileType, sheet_names: STATE.sheetNames }));
+      updatePreviewTableFromState();
+      showToast('已切换到工作表: ' + sheet, 'success');
     } catch (e) {
-      toast('切换失败: ' + e.message, 'error');
+      showToast('切换失败: ' + e.message, 'error');
     }
   });
 }
 
-/* ── Example Dataset Loading ───────────────────────────── */
-async function loadExampleDataset(name, options = {}) {
-  const btn = el('loadExampleBtn');
-  if (btn && !options.silent) setLoading(btn, true);
+async function loadExampleDataset(name, options) {
+  options = options || {};
+  var btn = dom('loadExampleBtn');
+  if (btn && !options.silent) { btn.disabled = true; btn.textContent = '加载中...'; }
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  var controller = new AbortController();
+  var timeoutId = setTimeout(function() { controller.abort(); }, 30000);
 
   try {
-    const res = await fetch(`/api/examples/${name}`, { signal: controller.signal });
+    var res = await fetch('/api/examples/' + name, { signal: controller.signal });
     clearTimeout(timeoutId);
     if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+      var err = await res.json().catch(function() { return { detail: 'HTTP ' + res.status }; });
       throw new Error(err.detail || '请求失败');
     }
-    const data = await res.json();
-    updateStateFromData({ ...data, upload_id: null, filename: data.filename, file_type: '.csv' });
+    var data = await res.json();
+    updateStateFromData(Object.assign({}, data, { upload_id: null, filename: data.filename, file_type: '.csv' }));
     STATE.datasetName = name;
-    saveActiveChartWorkspace();
-
-    if (typeof updateMetricGrid === 'function') updateMetricGrid();
-    if (typeof updatePreviewTable === 'function') updatePreviewTable();
-    if (typeof updateDatasetMeta === 'function') updateDatasetMeta();
-    if (typeof updateDownloadList === 'function') updateDownloadList();
-    if (typeof buildVarControls === 'function') buildVarControls();
-    if (typeof renderAppearanceControls === 'function') renderAppearanceControls();
-    if (typeof updateWorkflowButtons === 'function') updateWorkflowButtons();
-    if (typeof activateWsTab === 'function') activateWsTab('preview');
-    else if (typeof activateWorkspaceTab === 'function') activateWorkspaceTab('preview');
-    // Note: renderDataPanel() is NOT called here — callers must invoke it after
-    // the button has been restored, otherwise cloneNode captures the "处理中..." state
-
-    if (!options.silent && typeof setWorkflowHint === 'function') setWorkflowHint('示例数据已加载！请先查看右侧数据预览，然后点击下一步');
+    updatePreviewTableFromState();
+    if (typeof autoRecommendCurrentRoles === 'function') {
+      autoRecommendCurrentRoles({ quiet: true, render: typeof APP !== 'undefined' && APP.activeStep === 'variables' });
+    }
     return data;
   } catch (e) {
     clearTimeout(timeoutId);
-    const msg = e.name === 'AbortError' ? '请求超时，请检查网络' : '加载失败: ' + e.message;
-    toast(msg, 'error');
+    showToast('加载失败: ' + e.message, 'error');
     throw e;
   } finally {
-    if (btn && !options.silent) setLoading(btn, false);
+    if (btn && !options.silent) { btn.disabled = false; btn.textContent = '加载示例数据'; }
+  }
+}
+
+/* ── Upload handlers for 4-step workflow ─────────────────── */
+function setupUploadHandlers() {
+  var fileInput = dom('wsFileInput');
+  var uploadBtn = dom('uploadDataBtn');
+  var loadExampleBtn = dom('loadExampleBtn');
+  var cancelBtn = dom('cancelUploadBtn');
+  var fileNameInput = dom('uploadedFileNameInput');
+  var dataNextBtn = dom('dataNextBtn');
+
+  if (uploadBtn && fileInput) {
+    uploadBtn.addEventListener('click', function() { fileInput.click(); });
+  }
+
+  if (fileInput) {
+    fileInput.addEventListener('change', async function() {
+      var file = fileInput.files[0];
+      if (!file) return;
+      if (fileNameInput) fileNameInput.value = file.name;
+      if (cancelBtn) cancelBtn.disabled = false;
+      await handleFile(file);
+      if (dataNextBtn) dataNextBtn.disabled = false;
+    });
+  }
+
+  if (loadExampleBtn) {
+    loadExampleBtn.addEventListener('click', async function() {
+      var name = STATE.activeChartType
+        ? ((getTestConfig(STATE.activeChartType) || {}).exampleDataset || 'comprehensive_example')
+        : 'comprehensive_example';
+      try {
+        await loadExampleDataset(name);
+        if (dataNextBtn) dataNextBtn.disabled = false;
+        showToast('示例数据加载成功！', 'success');
+      } catch (e) {
+        showToast('示例加载失败: ' + e.message, 'error');
+      }
+    });
+  }
+
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', function() {
+      STATE.uploadId = null;
+      STATE.fileName = null;
+      if (fileNameInput) fileNameInput.value = '';
+      cancelBtn.disabled = true;
+      if (dataNextBtn) dataNextBtn.disabled = true;
+      resetDatasetState();
+      updatePreviewTableFromState();
+      showToast('已取消上传', 'info');
+    });
+  }
+
+  var downloadExampleBtn = dom('downloadExampleBtn');
+  if (downloadExampleBtn) {
+    downloadExampleBtn.addEventListener('click', function() {
+      var name = STATE.datasetName || 'comprehensive_example';
+      window.open('/api/examples/' + name + '/download', '_blank');
+    });
+  }
+}
+
+function updatePreviewTableFromState() {
+  var metaEl = dom('wsDataMeta');
+  var previewTable = dom('previewTable');
+  var dataStatusBar = dom('dataStatusBar');
+
+  if (metaEl) {
+    if (STATE.columns && STATE.columns.length > 0) {
+      metaEl.textContent = (STATE.rowCount || 0) + ' 行 × ' + (STATE.colCount || 0) + ' 列 · ' + (STATE.fileName || STATE.datasetName || '已加载');
+    } else {
+      metaEl.textContent = '请先选择统计方法，再上传数据或加载示例数据。';
+    }
+  }
+
+  if (dataStatusBar && STATE.rowCount > 0) {
+    var mp = STATE.summary && STATE.summary.missing_percent != null ? parseFloat(STATE.summary.missing_percent).toFixed(1) + '%' : '';
+    dataStatusBar.textContent = (STATE.rowCount || 0) + ' 行 × ' + (STATE.colCount || 0) + ' 列 · 缺失: ' + mp;
+  }
+
+  if (previewTable && STATE.previewRows && STATE.previewRows.length > 0 && STATE.columns) {
+    var cols = STATE.columns.slice(0, 12);
+    var html = '<table class="data-table"><thead><tr>';
+    cols.forEach(function(c) { html += '<th>' + escapeHtml(c) + '</th>'; });
+    html += '</tr></thead><tbody>';
+    STATE.previewRows.slice(0, 50).forEach(function(row) {
+      html += '<tr>';
+      cols.forEach(function(c) { html += '<td>' + escapeHtml(String(row[c] != null ? row[c] : '')) + '</td>'; });
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    previewTable.innerHTML = html;
+  } else if (previewTable) {
+    previewTable.innerHTML = '<div class="empty-state small">等待数据载入</div>';
   }
 }

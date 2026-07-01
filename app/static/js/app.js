@@ -1,1902 +1,1544 @@
 /* ── Main Application Entry ─────────────────────────────── */
+/* 4-step workflow: method → data → variables → result       */
 
-document.addEventListener('DOMContentLoaded', () => {
-  setupStepNavigation();
-  setupWorkspaceTabs();
-  setupFileInputs();
-  setupExportButtons();
-  setupThemeSelector();
-  setupPostHocSelect();
-  setupMethodGrid();
-  renderMiniTestGrid('parametric');
-  bootEmptyState();
-});
+const APP = {
+  methods: [],
+  methodMap: new Map(),
+  activeStep: 'method',
+  activeResultTab: 'chart',
+  lastResult: null,
+  sizeLinked: false,
+  chartAspect: 760 / 600,
+};
 
-// ===== State (extends base STATE from utils.js) =====
-Object.assign(STATE, {
-  activeStep: 'upload',
-  activeWsTab: 'preview',
-  activeChartCategory: 'parametric',
-  _testWorkspaces: {},
-  currentPlotlyDataRaw: null,
-  currentPlotlyLayoutRaw: null,
-  currentChartKind: null,
-  currentAppearanceContext: null,
-  chartVisualStyle: STATE.chartVisualStyle || 'solid',
-  chartBgPreset: STATE.chartBgPreset || 'white',
-  chartPaperBg: STATE.chartPaperBg || '#ffffff',
-  chartPlotBg: STATE.chartPlotBg || '#ffffff',
-  chartGridColor: STATE.chartGridColor || '#e5edf7',
-  chartGridMode: STATE.chartGridMode || 'grid',
-  barWidth: STATE.barWidth || 0.62,
-});
+/* ── DOM helpers ────────────────────────────────────────── */
+function dom(id) { return document.getElementById(id); }
+function domAll(selector, parent) { return Array.from((parent || document).querySelectorAll(selector)); }
+function escapeHtml(value) { return String(value ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-// DOM helpers
-const $ = (s) => document.querySelector(s);
-const $$ = (s) => Array.from(document.querySelectorAll(s));
-function el(id) { return document.getElementById(id); }
+function formula(title, math, note) {
+  return { title, math, note };
+}
 
-// ===== Step Navigation =====
+const BASIC_METHOD_FORMULAS = {
+  t_test_independent: formula('两独立样本均值差', 't = (x̄₁ - x̄₂) / √(s₁²/n₁ + s₂²/n₂)', '用于比较两个独立组的连续结局均值，默认推荐 Welch 校正以降低方差不齐带来的偏差。'),
+  t_test_paired: formula('配对差值检验', 't = d̄ / (s_d / √n)', '先计算每个对象前后或两方法之间的差值，再检验差值均值是否偏离 0。'),
+  one_sample_t_test: formula('单样本均值检验', 't = (x̄ - μ₀) / (s / √n)', '用于判断一个连续变量的总体均值是否偏离预设参考值。'),
+  normality_test: formula('Shapiro-Wilk 正态性检验', 'W = (Σ aᵢ x_(i))² / Σ(xᵢ - x̄)²', 'P 值较小时提示分布偏离正态，应结合 Q-Q 图和样本量一起判断。'),
+  levene_test: formula('Levene / Brown-Forsythe 方差齐性', 'W = 组间离差均方 / 组内离差均方', '以均值或中位数为中心比较各组离散程度，Brown-Forsythe 对偏态更稳健。'),
+  anova: formula('单因素方差分析', 'F = MS_between / MS_within', '比较三组及以上连续结局的均值差异；显著后应再看事后比较定位差异来源。'),
+  repeated_measures_anova: formula('重复测量方差分析', 'Yᵢⱼ = μ + subjectᵢ + timeⱼ + εᵢⱼ', '用于同一受试者多个时间点或条件下的连续结局，关键是区分个体内变化和个体间差异。'),
+  ancova: formula('协方差分析', 'Y = β₀ + β₁Group + β₂Covariate + ε', '在比较组间差异时同步校正连续协变量，常用于基线校正后的结局比较。'),
+  mann_whitney: formula('Mann-Whitney U 检验', 'U = R₁ - n₁(n₁ + 1)/2', '比较两个独立组的秩分布，适合偏态连续资料或等级资料。'),
+  kruskal_wallis: formula('Kruskal-Wallis H 检验', 'H = 12/[N(N+1)] Σ(Rᵢ²/nᵢ) - 3(N+1)', '非参数多组比较，显著后可继续做校正后的两两比较。'),
+  wilcoxon_signed_rank: formula('Wilcoxon 符号秩检验', 'W = Σ signed ranks', '用于配对资料的非参数比较，关注个体内差值的方向和秩大小。'),
+  friedman: formula('Friedman 检验', 'χ²_F = 12/[nk(k+1)] ΣRⱼ² - 3n(k+1)', '用于同一对象在多个时间点或条件下的非参数重复测量比较。'),
+  chi_square: formula('Pearson 卡方检验', 'χ² = Σ(O - E)² / E', '用于两个分类变量的关联分析，应同步查看列联表频数和期望频数。'),
+  fisher_exact: formula('Fisher 精确检验', 'p = Π row! Π col! / (n! Π cell!)', '适合 2×2 小样本或期望频数偏低的列联表。'),
+  mcnemar: formula('McNemar 配对分类检验', 'χ² = (|b - c| - 1)² / (b + c)', '只使用不一致配对 b 和 c 判断两种方法或两个时间点的分类改变。'),
+  pearson_correlation: formula('Pearson 相关', 'r = cov(X,Y) / (sₓsᵧ)', '度量两个连续变量的线性相关方向和强度。'),
+  spearman_correlation: formula('Spearman 秩相关', 'ρ = corr(rank(X), rank(Y))', '基于秩次评价单调关系，对偏态和极端值更稳健。'),
+  log_rank: formula('Log-rank 生存曲线比较', 'χ² = (O - E)² / V', '比较不同组 Kaplan-Meier 生存曲线，解释时需结合曲线形态和风险表。'),
+  logistic_regression: formula('Logistic 回归概率模型', 'logit(p) = log[p/(1-p)] = Xβ', '用于二分类结局建模，系数指数化后为每 1 SD 变化对应的 OR。'),
+  linear_regression: formula('多重线性回归', 'Y = β₀ + β₁X₁ + ... + βₚXₚ + ε', '用于连续结局的多因素线性建模，重点查看标准化 β、R² 和残差诊断。'),
+  discriminant_analysis: formula('线性判别分析', 'δ_k(x) = xᵀΣ⁻¹μ_k - 1/2 μ_kᵀΣ⁻¹μ_k + logπ_k', '用连续预测变量构造判别得分，查看类别是否在低维空间中分离。'),
+  quadratic_discriminant_analysis: formula('二次判别分析', 'δ_k(x) = -1/2log|Σ_k| - 1/2(x-μ_k)ᵀΣ_k⁻¹(x-μ_k) + logπ_k', '允许不同类别具有不同协方差结构，适合类别边界更弯曲的情形。'),
+};
+
+const BASIC_METHOD_CONCEPTS = {
+  paired: ['同一对象', '差值/变化', '配对检验'],
+  grouped: ['分组变量', '连续结局', '组间比较'],
+  categorical: ['分类变量 A', '列联表', '关联判断'],
+  correlation: ['变量 X', '散点关系', '相关系数'],
+  survival: ['随访时间', '事件状态', '生存曲线'],
+  regression: ['预测变量 X', '模型系数', '结局 Y'],
+  discriminant: ['连续指标', '判别空间', '类别分离'],
+  single: ['样本分布', '参考值/假设', '统计判断'],
+};
+
+const METHOD_INTROS = {
+  t_test_independent: '用于比较两个相互独立组别在连续结局上的平均水平。界面会把研究变量作为分组因素，把结局变量作为被比较的连续指标，并优先使用 Welch 版本降低方差不齐的影响。',
+  t_test_paired: '用于同一对象前后两次测量、左右配对或两种方法配对测量的均值比较。解释重点是每个对象内部差值，而不是两组独立样本。',
+  one_sample_t_test: '用于判断单个连续变量的样本均值是否偏离预设参考均值。适合有明确临床阈值、历史均值或标准值的场景。',
+  normality_test: '用于检查连续变量分布是否明显偏离正态。它更适合作为方法选择依据，应结合直方图、Q-Q 图、样本量和偏度峰度共同判断。',
+  levene_test: '用于比较不同组别的离散程度是否相近。若提示方差不齐，后续均值比较应优先选择 Welch、稳健方法或非参数方法。',
+  anova: '用于三组及以上独立组别的连续结局均值比较。总体检验回答“是否至少有一组不同”，显著后需要事后比较定位差异来源。',
+  repeated_measures_anova: '用于同一受试者在多个时间点或条件下的连续结局比较。模型会区分个体内变化和个体间差异，因此必须指定受试者 ID。',
+  ancova: '用于在比较组别差异的同时校正连续协变量，常见于基线校正、年龄校正或混杂因素控制后的结局比较。',
+  mann_whitney: '用于两个独立组的非参数比较，适合偏态连续资料、等级资料或明显不满足 t 检验前提的资料。',
+  kruskal_wallis: '用于三组及以上独立组的非参数比较。它比较秩分布差异，显著后仍需进行校正后的两两比较。',
+  wilcoxon_signed_rank: '用于配对资料的非参数比较，关注配对差值的方向和秩大小，适合偏态差值或等级配对资料。',
+  friedman: '用于同一对象多个时间点或条件下的非参数重复测量比较，是重复测量 ANOVA 的稳健替代。',
+  chi_square: '用于两个分类变量之间的关联分析。解释时应同时查看列联表频数、比例和期望频数，而不是只看 P 值。',
+  fisher_exact: '用于小样本 2x2 列联表的精确检验。当期望频数较低时，它比普通卡方检验更稳健。',
+  mcnemar: '用于配对二分类资料，常见于同一对象前后阳性率变化或两种诊断方法的配对比较。检验只由不一致配对贡献。',
+  pearson_correlation: '用于两个连续变量之间的线性相关分析。散点图形态、异常值和线性趋势会直接影响解释。',
+  spearman_correlation: '用于两个变量的单调相关分析，基于秩次计算，对偏态分布和极端值更稳健。',
+  log_rank: '用于比较不同组别的 Kaplan-Meier 生存曲线。需要同时指定随访时间、事件状态和分组变量。',
+  logistic_regression: '用于二分类结局的多因素建模。研究变量会作为预测因子进入模型，结果重点看 OR、置信区间、模型区分度和校准表现。',
+  linear_regression: '用于连续结局的多因素线性建模。解释重点包括标准化系数方向、效应大小、R² 和残差诊断。',
+  discriminant_analysis: '用于根据连续预测指标区分类别。LDA 假定类别协方差结构相近，结果应结合判别得分图和交叉验证准确率。',
+  quadratic_discriminant_analysis: '用于类别边界可能更弯曲的判别分析。QDA 允许不同类别有不同协方差结构，但更依赖样本量和正则化。',
+};
+
+const METHOD_CONCEPT_TYPES = {
+  t_test_independent: 'grouped',
+  levene_test: 'variance',
+  anova: 'variance',
+  repeated_measures_anova: 'longitudinal',
+  ancova: 'adjusted',
+  t_test_paired: 'paired',
+  wilcoxon_signed_rank: 'paired',
+  friedman: 'longitudinal',
+  one_sample_t_test: 'single',
+  normality_test: 'normality',
+  mann_whitney: 'rank',
+  kruskal_wallis: 'rank',
+  chi_square: 'categorical',
+  fisher_exact: 'categorical',
+  mcnemar: 'paired_categorical',
+  pearson_correlation: 'correlation',
+  spearman_correlation: 'correlation',
+  log_rank: 'survival',
+  logistic_regression: 'sigmoid',
+  linear_regression: 'regression',
+  discriminant_analysis: 'discriminant',
+  quadratic_discriminant_analysis: 'discriminant',
+};
+
+const METHOD_CONCEPT_LABELS = {
+  logistic_regression: ['预测因子', 'logit 概率', '二分类结局'],
+  linear_regression: ['多个预测因子', '线性组合', '连续结局'],
+  discriminant_analysis: ['连续指标', '判别空间', '类别边界'],
+  quadratic_discriminant_analysis: ['连续指标', '二次边界', '类别分离'],
+  log_rank: ['随访时间', '删失/事件', '生存曲线'],
+  normality_test: ['样本分位数', '理论分位数', '偏离判断'],
+  anova: ['组间变异', '组内变异', 'F 统计量'],
+  levene_test: ['组内离差', '方差齐性', '稳健判断'],
+  ancova: ['分组效应', '协变量校正', '调整均值'],
+  repeated_measures_anova: ['受试者 ID', '时间/条件', '个体内变化'],
+  friedman: ['受试者 ID', '秩次变化', '重复测量差异'],
+  chi_square: ['分类变量 A', '列联表频数', '关联判断'],
+  fisher_exact: ['2x2 频数', '精确概率', '小样本判断'],
+  mcnemar: ['配对前', '不一致配对', '配对后'],
+};
+
+function methodConceptType(testId) {
+  if (['t_test_paired', 'wilcoxon_signed_rank', 'mcnemar'].includes(testId)) return 'paired';
+  if (['chi_square', 'fisher_exact'].includes(testId)) return 'categorical';
+  if (['pearson_correlation', 'spearman_correlation'].includes(testId)) return 'correlation';
+  if (testId === 'log_rank') return 'survival';
+  if (['logistic_regression', 'linear_regression', 'ancova'].includes(testId)) return 'regression';
+  if (['discriminant_analysis', 'quadratic_discriminant_analysis'].includes(testId)) return 'discriminant';
+  if (['one_sample_t_test', 'normality_test'].includes(testId)) return 'single';
+  return 'grouped';
+}
+
+/* ── Toast ──────────────────────────────────────────────── */
+function showToast(msg, type) {
+  var container = dom('toastContainer');
+  if (!container) return;
+  var t = document.createElement('div');
+  t.className = 'toast ' + (type || 'info');
+  t.textContent = msg;
+  container.appendChild(t);
+  setTimeout(function() { t.style.opacity = '0'; t.style.transition = 'opacity 0.3s'; setTimeout(function() { t.remove(); }, 300); }, 3500);
+}
+
+/* ── API wrappers ───────────────────────────────────────── */
+async function apiPost(url, body) {
+  body = body || {};
+  var res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!res.ok) { var err = await res.json().catch(function() { return { detail: res.statusText }; }); throw new Error(err.detail || 'Request failed'); }
+  return res.json();
+}
+async function apiGet(url) {
+  var res = await fetch(url);
+  if (!res.ok) throw new Error('Request failed');
+  return res.json();
+}
+
+/* ── Step Navigation ────────────────────────────────────── */
 function setupStepNavigation() {
-  $$('.nav-step').forEach(btn => {
-    btn.addEventListener('click', () => activateStep(btn.dataset.step));
+  domAll('.nav-step').forEach(function(btn) {
+    btn.addEventListener('click', function() { activateStep(btn.dataset.tab); });
   });
 }
 
 function activateStep(stepName) {
-  STATE.activeStep = stepName;
-  $$('.nav-step').forEach(b => b.classList.remove('active'));
-  $$('.step-panel').forEach(p => p.style.display = 'none');
-  const btn = $(`.nav-step[data-step="${stepName}"]`);
-  const panel = document.getElementById(`step-panel-${stepName}`);
+  APP.activeStep = stepName;
+  domAll('.nav-step').forEach(function(b) { b.classList.remove('active'); });
+  domAll('.tab-panel').forEach(function(p) { p.classList.remove('active'); });
+  var btn = document.querySelector('.nav-step[data-tab="' + stepName + '"]');
+  var panel = dom('tab-' + stepName);
   if (btn) btn.classList.add('active');
-  if (panel) panel.style.display = 'flex';
-
-  // Default tab per step: controls are rendered in the right workspace, not in the left sidebar.
-  if (stepName === 'upload') activateWsTab('preview');
-  else if (stepName === 'variables') activateWsTab('variables');
-  else if (stepName === 'methods') activateWsTab('methods');
-  else if (stepName === 'run') activateWsTab('run');
-  else if (stepName === 'result') activateWsTab(STATE.currentStatResult ? 'descriptive' : 'descriptive');
-  updateResultTopTabsVisibility();
-}
-
-// ===== Workspace Tabs =====
-function setupWorkspaceTabs() {
-  $$('.ws-tab').forEach(tab => {
-    tab.addEventListener('click', () => activateWsTab(tab.dataset.tab));
-  });
-  $$('.result-top-tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      if (STATE.activeStep !== 'result') activateStep('result');
-      activateWsTab(tab.dataset.tab);
-    });
-  });
-}
-
-function activateWorkspaceTab(tabName) { return activateWsTab(tabName); }
-
-function activateWsTab(tabName) {
-  STATE.activeWsTab = tabName;
-  $$('.ws-tab').forEach(t => t.classList.remove('active'));
-  $$('.ws-panel').forEach(p => p.classList.remove('active'));
-  const tab = $(`.ws-tab[data-tab="${tabName}"]`);
-  const panel = document.getElementById(`ws-${tabName}`);
-  if (tab) tab.classList.add('active');
   if (panel) panel.classList.add('active');
-
-  // Reload chart when switching to chart tab
-  updateResultTopTabsActive(tabName);
-  if (tabName === 'chart' && STATE.currentPlotlyData && STATE.currentPlotlyData.length > 0) {
-    setTimeout(() => renderChart(STATE.currentPlotlyData, STATE.currentPlotlyLayout), 100);
-  }
-  updateChartSettingsVisibility();
-  if (tabName === 'run') updateRunPanel();
 }
 
-function updateResultTopTabsVisibility() {
-  const bar = el('resultTopTabs');
-  const exportBar = el('resultUnifiedExportBar');
-  if (!bar) return;
-  const show = STATE.activeStep === 'result';
-  bar.hidden = !show;
-  bar.classList.toggle('is-visible', show);
-  if (exportBar) exportBar.hidden = !(show && !!STATE.currentStatResult);
-  updateResultTopTabsActive(STATE.activeWsTab || 'descriptive');
-}
-
-function updateResultTopTabsActive(tabName) {
-  $$('.result-top-tab').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.tab === tabName);
-  });
-}
-
-// ===== File Inputs =====
-function setupFileInputs() {
-  const fileInput = el('wsFileInput');
-  const uploadBtn = el('uploadDataBtn');
-  if (uploadBtn && fileInput) uploadBtn.addEventListener('click', () => fileInput.click());
-  if (fileInput) {
-    fileInput.addEventListener('change', () => {
-      if (fileInput.files.length > 0) {
-        handleFile(fileInput.files[0], { fromChart: true });
-        fileInput.value = '';
-      }
-    });
-  }
-
-  const loadBtn = el('loadExampleBtn');
-  if (loadBtn) loadBtn.addEventListener('click', () => doLoadExample());
-
-  // Preview / workflow next buttons
-  const nextBtn = el('previewNextBtn');
-  if (nextBtn) nextBtn.addEventListener('click', () => activateStep('variables'));
-  const variableNextBtn = el('variableNextBtn');
-  if (variableNextBtn) variableNextBtn.addEventListener('click', () => activateStep('methods'));
-  const methodNextBtn = el('methodNextBtn');
-  if (methodNextBtn) methodNextBtn.addEventListener('click', () => activateStep('run'));
-
-  $$('.result-nav-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      activateStep('result');
-      activateWsTab(btn.dataset.resultTab || 'descriptive');
-    });
-  });
-}
-
-async function doLoadExample() {
-  const loadBtn = el('loadExampleBtn');
-  if (loadBtn) loadBtn.disabled = true;
-  try {
-    await loadExampleDataset('comprehensive_example', { silent: true });
-    buildVarControls();
-    renderAppearanceControls();
-    updateMetricGrid();
-    updatePreviewTable();
-    updateDownloadList();
-    updateDataMeta();
-    updateStep2DataInfo();
-    updateWorkflowButtons();
-    el('generateChartBtn').disabled = true;
-    setWorkflowHint('示例数据已加载！请先查看右侧数据预览，然后点击下一步');
-    activateStep('upload');
-    activateWsTab('preview');
-  } catch(e) {
-    toast('加载示例失败: ' + e.message, 'error');
-  } finally {
-    if (loadBtn) loadBtn.disabled = false;
-  }
-}
-
-// ===== Method Grid =====
-function setupMethodGrid() {
-  const grid = el('miniTestGrid');
-  if (!grid) return;
-  grid.addEventListener('click', function(e) {
-    const card = e.target.closest('.mini-chart-card');
-    if (!card) return;
-    if (card.classList.contains('method-disabled')) {
-      const reason = card.querySelector('.method-reason');
-      toast(reason ? reason.textContent : '该方法不适用于当前数据', 'warning');
-      return;
-    }
-    const testId = card.dataset.test;
-    if (testId) selectTest(testId);
-  });
-
-  // Category tabs
-  $$('#testCatTabs .cat-tab').forEach(tab => {
-    tab.addEventListener('click', function() {
-      $$('#testCatTabs .cat-tab').forEach(t => t.classList.remove('active'));
-      this.classList.add('active');
-      STATE.activeChartCategory = this.dataset.cat;
-      renderMiniTestGrid(this.dataset.cat);
-    });
-  });
-}
-
-function renderMiniTestGrid(category) {
-  const grid = el('miniTestGrid');
+/* ── Method Grid in LEFT panel (Step 1) ─────────────────── */
+function renderMethodGrid(category) {
+  var grid = dom('miniMethodGrid');
   if (!grid || typeof TEST_CATALOG === 'undefined') return;
-  const tests = Object.values(TEST_CATALOG).filter(t => t.category === category);
+  var tests = Object.values(TEST_CATALOG).filter(function(t) { return t.category === category; });
 
-  const hasData = STATE.columns && STATE.columns.length > 0;
-  const selVars = collectSelectedVars();
-  const availabilityMap = {};
-  Object.values(TEST_CATALOG).forEach(test => {
-    availabilityMap[test.id] = hasData ? checkMethodAvailability(test, selVars) : { available: true, reason: '' };
-  });
-  STATE.methodAvailability = availabilityMap;
-
-  grid.innerHTML = tests.map(test => {
-    const avail = availabilityMap[test.id] || { available: true, reason: '' };
-    const disabledClass = hasData && !avail.available ? ' method-disabled' : '';
-    const selectedClass = STATE.activeChartType === test.id ? ' selected' : '';
-    const reasonHtml = hasData && !avail.available
-      ? `<span class="method-reason">${escapeHtml(avail.reason)}</span>`
-      : `<span class="method-reason method-ok">当前变量可用</span>`;
-
-    return `
-      <div class="mini-chart-card${selectedClass}${disabledClass}" data-test="${test.id}">
-        <span class="mini-chart-icon">${escapeHtml(test.icon)}</span>
-        <span class="mini-chart-name">${escapeHtml(test.name)}</span>
-        ${reasonHtml}
-      </div>
-    `;
+  grid.innerHTML = tests.map(function(test) {
+    var activeClass = STATE.activeChartType === test.id ? ' active' : '';
+    return '<div class="method-card' + activeClass + '" data-test="' + test.id + '">' +
+      '<strong>' + escapeHtml(test.name) + '</strong>' +
+    '</div>';
   }).join('');
-  updateStep3DataInfo();
-  updateWorkflowButtons();
+
+  domAll('.method-card', grid).forEach(function(card) {
+    card.addEventListener('click', function() {
+      var testId = card.dataset.test;
+      selectMethod(testId);
+    });
+  });
+  updateMethodDetail();
 }
 
-function selectTest(testId) {
+function selectMethod(testId) {
   STATE.activeChartType = testId;
+  var config = getTestConfig(testId);
+  if (config && config.exampleDataset) { STATE.datasetName = config.exampleDataset; }
+
+  // Reset results
   STATE.currentResult = null;
   STATE.currentStatResult = null;
   STATE.currentStatChartData = null;
-  STATE.currentPlotlyDataRaw = null;
-  STATE.currentPlotlyLayoutRaw = null;
-  STATE.currentChartKind = null;
-  STATE.currentAppearanceContext = null;
   STATE.currentPlotlyData = null;
   STATE.currentPlotlyLayout = null;
   STATE.currentTables = null;
   STATE.currentDiscussion = null;
   STATE.currentTableData = null;
-  STATE.postHocMethod = el('postHocSelect')?.value || null;
+  STATE.userTraceColorsByChart = {};
+  STATE.userColors = null;
+  APP.chartVariants = [];
+  APP.activeChartVariant = 0;
 
-  const config = getTestConfig(testId);
-  if (config && !STATE.uploadId && !STATE.datasetName) {
-    STATE.datasetName = 'comprehensive_example';
-  }
+  // Reset method params
+  STATE.methodParams = {};
+  getResolvedTestParams(testId).forEach(function(p) { STATE.methodParams[p.key] = p.default; });
 
-  renderMiniTestGrid(STATE.activeChartCategory);
-
-  const label = el('selectedTestLabel');
-  if (label) label.textContent = config ? '已选：' + config.name : '请选择统计方法';
-
-  const analysisTitle = el('analysisTitle');
-  if (analysisTitle) analysisTitle.textContent = config ? config.name + ' — 分析结果' : '分析结果';
-
-  const resultBadge = el('resultBadge');
-  if (resultBadge) { resultBadge.textContent = config ? config.description || '' : ''; }
-
-  updatePostHocSection();
-  updateDataMeta();
-  updateDownloadList();
-  updateMetricGrid();
-  resetResults();
-
-  // Enable workflow buttons
-  const runBtn = el('generateChartBtn');
-  if (runBtn) runBtn.disabled = !(STATE.columns && STATE.columns.length > 0);
-  updateWorkflowButtons();
+  // Redraw left panel method grid with selection
+  renderMethodGrid(STATE.activeChartCategory);
+  // Redraw right side method detail
+  updateMethodDetail();
+  updateDataMethodCard();
+  updateVariableMethodCard();
+  enableNextIfReady();
 }
 
-function collectSelectedVars() {
-  const vars = {};
-  const selects = $$('#varControls select');
-  selects.forEach(sel => {
-    const key = sel.id.replace('chartVar_', '');
-    if (sel.multiple) {
-      const roleIds = ['research_vars', 'covar_vars', 'outcome_vars'];
-      vars[key] = roleIds.includes(key)
-        ? [...sel.options].map(o => o.value).filter(Boolean)
-        : [...sel.selectedOptions].map(o => o.value).filter(Boolean);
+function updateMethodDetail() {
+  var detail = dom('methodDetail');
+  var config = STATE.activeChartType ? getTestConfig(STATE.activeChartType) : null;
+  if (detail) {
+    if (config) {
+      var formulaDef = BASIC_METHOD_FORMULAS[config.id] || formula('通用统计表达', 'Statistic = f(data, variables, parameters)', '系统会根据当前变量角色、数据类型和参数生成对应统计结果。');
+      var intro = METHOD_INTROS[config.id] || config.description || '选择变量后，系统会根据该统计方案完成检验、图表、统计结果和结果解读。';
+      detail.innerHTML =
+        '<article class="method-detail-card">' +
+          '<p class="method-detail-kicker">当前统计方法</p>' +
+          '<h1 id="method-title">' + escapeHtml(config.name) + '</h1>' +
+          '<section class="method-detail-block">' +
+            '<h2>基本概念</h2>' +
+            '<p>' + escapeHtml(intro) + '</p>' +
+          '</section>' +
+          '<section class="method-detail-block">' +
+            '<h2>核心公式</h2>' +
+            renderFormulaBox(formulaDef) +
+          '</section>' +
+          '<section class="method-detail-block">' +
+            '<h2>概念图</h2>' +
+            renderConceptGraphic(config) +
+          '</section>' +
+        '</article>';
     } else {
-      vars[key] = sel.value;
-    }
-  });
-
-  // New universal variable-selection model:
-  // 研究变量 = exposure / grouping / predictor candidates
-  // 协变量/混杂因素 = adjustment variables / subject id / additional predictors
-  // 结局变量 = outcome / response / paired second endpoint / survival time-event pair
-  let research = Array.isArray(vars.research_vars) ? vars.research_vars : [];
-  let covars = Array.isArray(vars.covar_vars) ? vars.covar_vars : [];
-  let outcomes = Array.isArray(vars.outcome_vars) ? vars.outcome_vars : [];
-  const uniq = arr => [...new Set((arr || []).filter(Boolean))];
-
-  // 防止用户还未完成四栏变量转移时点击“开始分析”直接报错：
-  // 使用当前统计方法的默认字段作为兜底，并且只采用当前数据集中真实存在的列。
-  const defaults = (typeof getTestDefaultParams === 'function') ? getTestDefaultParams(STATE.activeChartType) : {};
-  const hasCol = v => !!v && (!STATE.columns || STATE.columns.includes(v));
-  if (defaults) {
-    const defaultOutcome = [defaults.y_var, defaults.var, defaults.outcome_var].find(hasCol);
-    const defaultResearch = [defaults.x_var, defaults.group_var, defaults.time_var].find(hasCol);
-    const defaultPaired = [defaults.paired_var, defaults.event_var, defaults.var2].find(hasCol);
-    const defaultCovars = [
-      ...(Array.isArray(defaults.value_vars) ? defaults.value_vars : []),
-      ...(Array.isArray(defaults.x_vars) ? defaults.x_vars : []),
-      ...(Array.isArray(defaults.predictor_vars) ? defaults.predictor_vars : []),
-      defaults.covar,
-      defaults.subject_var,
-    ].filter(hasCol);
-    if (!outcomes.length && defaultOutcome) outcomes = uniq([defaultOutcome, defaultPaired].filter(hasCol));
-    if (!research.length && defaultResearch) research = uniq([defaultResearch].filter(hasCol));
-    if (!covars.length && defaultCovars.length) {
-      covars = uniq(defaultCovars.filter(v => v !== defaultOutcome && v !== defaultResearch && v !== defaultPaired));
+      detail.innerHTML = '<div class="method-detail-empty"><span>方法概览</span><h1>请选择一个统计方法</h1></div>';
     }
   }
-
-  const primaryOutcome = outcomes[0] || research[0] || '';
-  const primaryResearch = research[0] || '';
-  const secondaryOutcome = outcomes.find(v => v !== primaryOutcome) || outcomes[1] || '';
-  const secondaryResearch = research.find(v => v !== primaryResearch) || research[1] || '';
-  const predictors = uniq([...research, ...covars].filter(v => v !== primaryOutcome));
-
-  // Compatibility aliases consumed by the existing backend/statistical services.
-  vars.var = primaryOutcome;
-  vars.y_var = primaryOutcome;
-  vars.group_var = primaryResearch;
-  vars.x_var = primaryResearch;
-  vars.paired_var = secondaryOutcome || secondaryResearch;
-  vars.covar = covars[0] || '';
-  vars.value_vars = predictors;
-  vars.x_vars = predictors;
-
-  const idLike = [...covars, ...research, ...outcomes].find(v => /(^id$|_id$|id_|subject|patient|编号|序号)/i.test(String(v)));
-  vars.subject_var = idLike || covars[0] || research[0] || '';
-
-  const allSelected = uniq([...outcomes, ...research, ...covars]);
-  const timeLike = allSelected.find(v => /time|survival|follow|duration|天|月|时间|生存/i.test(String(v)));
-  const eventLike = allSelected.find(v => /event|death|status|outcome|结局|事件|死亡/i.test(String(v)));
-  vars.time_var = timeLike || outcomes[0] || '';
-  vars.event_var = eventLike && eventLike !== vars.time_var ? eventLike : (outcomes.find(v => v !== vars.time_var) || outcomes[1] || '');
-
-  return vars;
 }
 
-// ===== Method Availability Checker =====
-function getColumnTypeMap() {
-  const colTypeMap = {};
-  const groupedVT = STATE.variableTypes || {};
-  for (const [typeName, typeCols] of Object.entries(groupedVT)) {
-    if (Array.isArray(typeCols)) typeCols.forEach(c => { colTypeMap[c] = typeName; });
-  }
-  return colTypeMap;
+function renderFormulaBox(item) {
+  return '<div class="formula-box">' +
+    '<strong>' + escapeHtml(item.title || '核心公式') + '</strong>' +
+    '<div class="formula-scroll"><div class="formula-math">' + escapeHtml(item.math || '') + '</div></div>' +
+    (item.note ? '<p>' + escapeHtml(item.note) + '</p>' : '') +
+  '</div>';
 }
 
-function getColumnType(col) {
-  return getColumnTypeMap()[col] || '';
+function renderConceptGraphic(config) {
+  var type = METHOD_CONCEPT_TYPES[config.id] || methodConceptType(config.id);
+  var labels = METHOD_CONCEPT_LABELS[config.id] || BASIC_METHOD_CONCEPTS[type] || BASIC_METHOD_CONCEPTS[methodConceptType(config.id)] || BASIC_METHOD_CONCEPTS.grouped;
+  return '<div class="concept-map concept-map-' + escapeHtml(type) + '">' +
+    renderConceptSvg(type, labels) +
+    '<div class="concept-caption-row">' + labels.map(function(label) { return '<span>' + escapeHtml(label) + '</span>'; }).join('') + '</div>' +
+  '</div>';
 }
 
-function isContinuousVar(col) {
-  const t = getColumnType(col);
-  return ['continuous', 'numeric', 'date', 'time'].includes(t);
-}
-
-function isCategoricalVar(col) {
-  const t = getColumnType(col);
-  return ['categorical', 'binary', 'group', 'outcome_candidate', 'ordinal_categorical', 'region'].includes(t);
-}
-
-function isBinaryVar(col) {
-  const t = getColumnType(col);
-  return ['binary', 'outcome_candidate'].includes(t) || /event|death|status|outcome|结局|事件|死亡/i.test(String(col));
-}
-
-function asArrayValue(v) {
-  return Array.isArray(v) ? v.filter(Boolean) : (v ? [v] : []);
-}
-
-function getAnalysisRows() {
-  if (Array.isArray(STATE.previewRows) && STATE.previewRows.length) return STATE.previewRows;
-  return [];
-}
-
-function normalizeCellValue(v) {
-  if (v === null || v === undefined) return null;
-  const s = String(v).trim();
-  if (!s || ['NA', 'N/A', 'nan', 'NaN', 'None', 'none', 'null', 'NULL'].includes(s)) return null;
-  return s;
-}
-
-function getColumnValues(col) {
-  const rows = getAnalysisRows();
-  if (!col || !rows.length) return [];
-  return rows.map(row => row ? row[col] : undefined);
-}
-
-function toFiniteNumber(v) {
-  const s = normalizeCellValue(v);
-  if (s === null) return null;
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
-}
-
-function nonMissingValues(col) {
-  return getColumnValues(col).map(normalizeCellValue).filter(v => v !== null);
-}
-
-function numericValues(col) {
-  return getColumnValues(col).map(toFiniteNumber).filter(v => v !== null);
-}
-
-function uniqueCount(values) {
-  return new Set((values || []).map(v => String(v))).size;
-}
-
-function categoryLevels(col) {
-  return [...new Set(nonMissingValues(col).map(v => String(v)))];
-}
-
-function hasNumericSignal(col, minN = 3) {
-  const vals = numericValues(col);
-  return vals.length >= minN && uniqueCount(vals) > 1;
-}
-
-function isIdLikeForAvailability(col) {
-  if (!col) return false;
-  return getColumnType(col) === 'id' || /(^id$|_id$|id_|subject|patient|record|编号|序号)/i.test(String(col));
-}
-
-function groupedNumericCounts(yVar, groupVar) {
-  const y = getColumnValues(yVar);
-  const g = getColumnValues(groupVar);
-  const n = Math.min(y.length, g.length);
-  const map = new Map();
-  for (let i = 0; i < n; i += 1) {
-    const gy = normalizeCellValue(g[i]);
-    const yy = toFiniteNumber(y[i]);
-    if (gy === null || yy === null) continue;
-    if (!map.has(gy)) map.set(gy, 0);
-    map.set(gy, map.get(gy) + 1);
-  }
-  return map;
-}
-
-function pairedNumericCount(aVar, bVar) {
-  const a = getColumnValues(aVar);
-  const b = getColumnValues(bVar);
-  const n = Math.min(a.length, b.length);
-  let count = 0;
-  for (let i = 0; i < n; i += 1) {
-    if (toFiniteNumber(a[i]) !== null && toFiniteNumber(b[i]) !== null) count += 1;
-  }
-  return count;
-}
-
-function pairedCategoricalInfo(aVar, bVar) {
-  const a = getColumnValues(aVar);
-  const b = getColumnValues(bVar);
-  const levels = new Set();
-  let count = 0;
-  const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i += 1) {
-    const av = normalizeCellValue(a[i]);
-    const bv = normalizeCellValue(b[i]);
-    if (av === null || bv === null) continue;
-    levels.add(av);
-    levels.add(bv);
-    count += 1;
-  }
-  return { count, levels: [...levels] };
-}
-
-function contingencyShape(aVar, bVar) {
-  const a = getColumnValues(aVar);
-  const b = getColumnValues(bVar);
-  const rowLevels = new Set();
-  const colLevels = new Set();
-  let count = 0;
-  const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i += 1) {
-    const av = normalizeCellValue(a[i]);
-    const bv = normalizeCellValue(b[i]);
-    if (av === null || bv === null) continue;
-    rowLevels.add(av);
-    colLevels.add(bv);
-    count += 1;
-  }
-  return { rows: rowLevels.size, cols: colLevels.size, count };
-}
-
-function binaryEventInfo(col) {
-  const raw = nonMissingValues(col);
-  const nums = getColumnValues(col).map(toFiniteNumber).filter(v => v !== null);
-  const levels = [...new Set(nums.map(Number))];
-  const validBinary = raw.length > 0 && nums.length / Math.max(raw.length, 1) >= 0.85 && levels.length <= 2 && levels.every(v => v === 0 || v === 1);
-  return { valid: validBinary, n: nums.length, levels };
-}
-
-function survivalGroupCounts(timeVar, eventVar, groupVar) {
-  const time = getColumnValues(timeVar);
-  const event = getColumnValues(eventVar);
-  const group = getColumnValues(groupVar);
-  const n = Math.min(time.length, event.length, group.length);
-  const map = new Map();
-  for (let i = 0; i < n; i += 1) {
-    const t = toFiniteNumber(time[i]);
-    const e = toFiniteNumber(event[i]);
-    const g = normalizeCellValue(group[i]);
-    if (t === null || t < 0 || g === null || !(e === 0 || e === 1)) continue;
-    if (!map.has(g)) map.set(g, 0);
-    map.set(g, map.get(g) + 1);
-  }
-  return map;
-}
-
-function repeatedCompleteSubjects(yVar, subjectVar, groupVar) {
-  const y = getColumnValues(yVar);
-  const s = getColumnValues(subjectVar);
-  const g = getColumnValues(groupVar);
-  const groups = categoryLevels(groupVar);
-  const bySubject = new Map();
-  const n = Math.min(y.length, s.length, g.length);
-  for (let i = 0; i < n; i += 1) {
-    const sv = normalizeCellValue(s[i]);
-    const gv = normalizeCellValue(g[i]);
-    const yv = toFiniteNumber(y[i]);
-    if (sv === null || gv === null || yv === null) continue;
-    if (!bySubject.has(sv)) bySubject.set(sv, new Set());
-    bySubject.get(sv).add(gv);
-  }
-  let complete = 0;
-  bySubject.forEach(set => {
-    if (groups.every(level => set.has(level))) complete += 1;
-  });
-  return { complete, nGroups: groups.length };
-}
-
-function ancovaCompleteInfo(yVar, groupVar, covarVar) {
-  const y = getColumnValues(yVar);
-  const g = getColumnValues(groupVar);
-  const c = getColumnValues(covarVar);
-  const groups = new Set();
-  let count = 0;
-  const n = Math.min(y.length, g.length, c.length);
-  for (let i = 0; i < n; i += 1) {
-    const yv = toFiniteNumber(y[i]);
-    const cv = toFiniteNumber(c[i]);
-    const gv = normalizeCellValue(g[i]);
-    if (yv === null || cv === null || gv === null) continue;
-    groups.add(gv);
-    count += 1;
-  }
-  return { count, nGroups: groups.size };
-}
-
-function getUsableModelFeatures(predictors, options = {}) {
-  const allowCategorical = options.allowCategorical !== false;
-  const uniquePredictors = [...new Set((predictors || []).filter(Boolean))];
-  const features = [];
-  const skipped = [];
-  uniquePredictors.forEach(col => {
-    if (!STATE.columns || !STATE.columns.includes(col)) return;
-    const raw = nonMissingValues(col);
-    const numeric = numericValues(col);
-    const numericRatio = raw.length ? numeric.length / raw.length : 0;
-    const levels = categoryLevels(col);
-    if (isIdLikeForAvailability(col)) {
-      skipped.push({ name: col, reason: 'ID或标识符列' });
-      return;
-    }
-    if (raw.length && numericRatio >= 0.85) {
-      if (numeric.length >= 3 && uniqueCount(numeric) > 1) features.push({ name: col, kind: 'numeric', encoded: [col] });
-      else skipped.push({ name: col, reason: '数值列无有效变异' });
-      return;
-    }
-    if (!allowCategorical) {
-      skipped.push({ name: col, reason: '需要连续数值变量' });
-      return;
-    }
-    const maxLevels = Math.max(8, Math.min(20, Math.floor(Math.max(raw.length, 1) * 0.2)));
-    if (levels.length < 2) skipped.push({ name: col, reason: '分类水平不足' });
-    else if (levels.length > maxLevels) skipped.push({ name: col, reason: '高基数分类变量' });
-    else features.push({ name: col, kind: 'categorical', encoded: levels.slice(1).map(level => `${col}_${level}`) });
-  });
-  return {
-    features,
-    skipped,
-    encodedCount: features.reduce((sum, f) => sum + (f.encoded?.length || 0), 0),
-    numericCount: features.filter(f => f.kind === 'numeric').length,
+function renderConceptSvg(type, labels) {
+  var l0 = labels[0] || '数据';
+  var l1 = labels[1] || '模型';
+  var l2 = labels[2] || '结果';
+  var defs = '<defs>' +
+    '<linearGradient id="conceptLine" x1="0" x2="1" y1="0" y2="0"><stop offset="0%" stop-color="#2f6df6"></stop><stop offset="100%" stop-color="#0ea5a4"></stop></linearGradient>' +
+    '<linearGradient id="conceptBlue" x1="0" x2="1" y1="0" y2="1"><stop offset="0%" stop-color="#f2f7ff"></stop><stop offset="100%" stop-color="#bfd4ff"></stop></linearGradient>' +
+    '<linearGradient id="conceptMint" x1="0" x2="1" y1="0" y2="1"><stop offset="0%" stop-color="#ecfeff"></stop><stop offset="100%" stop-color="#99f6e4"></stop></linearGradient>' +
+    '<marker id="arrowHead" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#2563eb"></path></marker>' +
+  '</defs>';
+  var node = function(x, y, text, klass) {
+    return '<g class="svg-node ' + (klass || '') + '"><rect x="' + (x - 38) + '" y="' + (y - 18) + '" width="76" height="36" rx="8"></rect><text x="' + x + '" y="' + (y + 4) + '" text-anchor="middle">' + escapeHtml(text) + '</text></g>';
   };
+  var svgOpen = '<svg class="concept-svg" viewBox="0 0 260 168" role="img" aria-hidden="true">';
+  var svgClose = '</svg>';
+
+  if (type === 'normality') {
+    return svgOpen + defs +
+      '<path class="svg-axis" d="M42 132H226"></path><path class="svg-axis" d="M42 132V30"></path>' +
+      '<path class="svg-dash" d="M54 120L218 38"></path>' +
+      [58,78,98,118,138,158,178,198,218].map(function(x, i) {
+        var y = 122 - i * 10 + [6,-3,4,-5,2,-4,5,-2,3][i];
+        return '<circle class="svg-dot" cx="' + x + '" cy="' + y + '" r="4"></circle>';
+      }).join('') +
+      '<text class="svg-label" x="132" y="154" text-anchor="middle">' + escapeHtml(l1) + '</text>' +
+    svgClose;
+  }
+  if (type === 'correlation') {
+    return svgOpen + defs +
+      '<path class="svg-axis" d="M42 132H226"></path><path class="svg-axis" d="M42 132V30"></path>' +
+      '<path class="svg-curve" d="M54 120 C92 104 118 84 154 70 S208 46 226 34"></path>' +
+      [60,82,104,126,148,170,192,214].map(function(x, i) { return '<circle class="svg-dot" cx="' + x + '" cy="' + (118 - i * 10 + (i % 2 ? 8 : -4)) + '" r="4"></circle>'; }).join('') +
+      '<text class="svg-label" x="132" y="154" text-anchor="middle">' + escapeHtml(l1) + '</text>' +
+    svgClose;
+  }
+  if (type === 'survival') {
+    return svgOpen + defs +
+      '<path class="svg-axis" d="M34 132H230"></path><path class="svg-axis" d="M44 136V30"></path>' +
+      '<path class="svg-step" d="M48 44H82V62H116V82H154V100H196V122H226"></path>' +
+      '<path class="svg-step two" d="M48 38H94V52H136V74H174V92H218V114"></path>' +
+      '<text class="svg-label" x="132" y="154" text-anchor="middle">' + escapeHtml(l2) + '</text>' +
+    svgClose;
+  }
+  if (type === 'sigmoid') {
+    return svgOpen + defs +
+      '<path class="svg-axis" d="M38 132H230"></path><path class="svg-axis" d="M44 136V28"></path>' +
+      '<path class="svg-curve" d="M50 124 C84 124 94 116 112 92 S142 42 176 42 S212 42 226 36"></path>' +
+      '<line class="svg-threshold" x1="44" y1="84" x2="226" y2="84"></line>' +
+      node(72, 42, l0, 'source') + node(188, 126, l2, 'target') +
+    svgClose;
+  }
+  if (type === 'regression') {
+    return svgOpen + defs +
+      '<path class="svg-axis" d="M38 132H228"></path><path class="svg-axis" d="M44 136V30"></path>' +
+      '<path class="svg-curve two" d="M54 118 C86 106 112 92 146 72 S196 48 222 38"></path>' +
+      [62,82,104,128,150,172,194,216].map(function(x, i) {
+        return '<circle class="svg-dot" cx="' + x + '" cy="' + (116 - i * 10 + (i % 2 ? 7 : -5)) + '" r="4"></circle>';
+      }).join('') +
+      '<text class="svg-label" x="132" y="154" text-anchor="middle">' + escapeHtml(l1) + '</text>' +
+    svgClose;
+  }
+  if (type === 'discriminant') {
+    return svgOpen + defs +
+      '<ellipse class="svg-cluster" cx="86" cy="78" rx="42" ry="30"></ellipse>' +
+      '<ellipse class="svg-cluster two" cx="176" cy="92" rx="42" ry="32"></ellipse>' +
+      '<path class="svg-margin" d="M132 32 C124 68 128 104 116 138"></path>' +
+      [58,72,88,104,116].map(function(x, i) { return '<circle class="svg-point-a" cx="' + x + '" cy="' + (72 + (i % 3) * 11) + '" r="4"></circle>'; }).join('') +
+      [154,168,184,198,208].map(function(x, i) { return '<circle class="svg-point-b" cx="' + x + '" cy="' + (84 + (i % 3) * 12) + '" r="4"></circle>'; }).join('') +
+      '<text class="svg-label" x="132" y="154" text-anchor="middle">' + escapeHtml(l1) + '</text>' +
+    svgClose;
+  }
+  if (type === 'adjusted') {
+    return svgOpen + defs +
+      node(62, 52, l0, 'source') +
+      node(132, 112, l1, 'model') +
+      node(202, 52, l2, 'target') +
+      '<path class="svg-arrow" d="M94 60 C112 70 118 88 126 96"></path>' +
+      '<path class="svg-arrow" d="M170 96 C178 86 184 70 190 62"></path>' +
+      '<path class="svg-curve two" d="M52 138 C92 126 166 126 208 138"></path>' +
+    svgClose;
+  }
+  if (type === 'variance') {
+    return svgOpen + defs +
+      '<path class="svg-axis" d="M38 132H226"></path>' +
+      '<path class="svg-band" d="M48 116 C70 58 104 58 126 116 Z"></path>' +
+      '<path class="svg-band two" d="M134 116 C158 46 198 46 222 116 Z"></path>' +
+      '<path class="svg-curve" d="M48 116 C70 58 104 58 126 116"></path>' +
+      '<path class="svg-curve two" d="M134 116 C158 46 198 46 222 116"></path>' +
+      '<text class="svg-label" x="88" y="148" text-anchor="middle">' + escapeHtml(l0) + '</text>' +
+      '<text class="svg-label" x="178" y="148" text-anchor="middle">' + escapeHtml(l1) + '</text>' +
+    svgClose;
+  }
+  if (type === 'rank') {
+    return svgOpen + defs +
+      '<path class="svg-axis" d="M36 132H228"></path>' +
+      [50,74,98,122,146,170,194,218].map(function(x, i) {
+        return '<rect class="svg-bar-fill" x="' + (x - 6) + '" y="' + (122 - i * 8) + '" width="12" height="' + (10 + i * 8) + '" rx="3"></rect>';
+      }).join('') +
+      '<path class="svg-arrow" d="M58 44 C104 26 162 28 210 52"></path>' +
+      '<text class="svg-label" x="132" y="154" text-anchor="middle">' + escapeHtml(l1) + '</text>' +
+    svgClose;
+  }
+  if (type === 'categorical') {
+    return svgOpen + defs +
+      '<rect class="svg-table" x="52" y="38" width="156" height="92" rx="8"></rect>' +
+      '<path class="svg-axis" d="M52 68H208M52 99H208M104 38V130M156 38V130"></path>' +
+      node(70, 148, l0, 'source') + node(190, 148, l2, 'target') +
+    svgClose;
+  }
+  if (type === 'paired') {
+    return svgOpen + defs +
+      '<path class="svg-axis" d="M50 132H214"></path>' +
+      [50,84,118,152,186].map(function(x, i) {
+        var y1 = 110 - (i % 2) * 20;
+        var y2 = 82 - (i % 3) * 12;
+        return '<path class="svg-dash" d="M' + x + ' ' + y1 + 'L' + (x + 22) + ' ' + y2 + '"></path><circle class="svg-dot" cx="' + x + '" cy="' + y1 + '" r="4"></circle><circle class="svg-dot alt" cx="' + (x + 22) + '" cy="' + y2 + '" r="4"></circle>';
+      }).join('') +
+      '<text class="svg-label" x="132" y="154" text-anchor="middle">' + escapeHtml(l1) + '</text>' +
+    svgClose;
+  }
+  if (type === 'paired_categorical') {
+    return svgOpen + defs +
+      '<rect class="svg-table" x="58" y="36" width="144" height="92" rx="8"></rect>' +
+      '<path class="svg-axis" d="M58 82H202M130 36V128"></path>' +
+      '<path class="svg-arrow" d="M86 58 C110 42 150 42 174 58"></path>' +
+      '<path class="svg-arrow" d="M174 106 C150 122 110 122 86 106"></path>' +
+      '<text class="svg-label" x="132" y="154" text-anchor="middle">' + escapeHtml(l1) + '</text>' +
+    svgClose;
+  }
+  if (type === 'longitudinal') {
+    return svgOpen + defs +
+      '<path class="svg-axis" d="M34 132H230"></path><path class="svg-axis" d="M44 136V28"></path>' +
+      '<path class="svg-curve" d="M50 116 C86 92 116 104 148 70 S202 58 224 38"></path>' +
+      '<path class="svg-curve two" d="M50 126 C86 112 116 82 150 92 S202 72 224 62"></path>' +
+      '<path class="svg-curve three" d="M50 96 C86 88 112 68 150 58 S202 46 224 30"></path>' +
+      [50,94,138,182,224].map(function(x) { return '<circle class="svg-dot" cx="' + x + '" cy="132" r="3"></circle>'; }).join('') +
+      '<text class="svg-label" x="132" y="154" text-anchor="middle">' + escapeHtml(l2) + '</text>' +
+    svgClose;
+  }
+  return svgOpen + defs +
+    node(58, 84, l0, 'source') +
+    node(132, 84, l1, 'model') +
+    node(206, 84, l2, 'target') +
+    '<path class="svg-arrow" d="M96 84H120"></path><path class="svg-arrow" d="M170 84H194"></path>' +
+    '<path class="svg-ci" d="M64 126 C98 112 164 112 198 126"></path>' +
+  svgClose;
 }
 
-function modelCompleteInfo(outcomeVar, features, options = {}) {
-  const outcomeKind = options.outcomeKind || 'categorical';
-  const y = getColumnValues(outcomeVar);
-  const featureValues = features.map(f => ({ feature: f, values: getColumnValues(f.name) }));
-  const n = Math.min(y.length, ...featureValues.map(fv => fv.values.length).filter(Boolean));
-  const classCounts = new Map();
-  let count = 0;
-  let yUniqueNumeric = new Set();
-  for (let i = 0; i < n; i += 1) {
-    let ok = true;
-    let yValue;
-    if (outcomeKind === 'continuous') {
-      yValue = toFiniteNumber(y[i]);
-      ok = yValue !== null;
-      if (ok) yUniqueNumeric.add(yValue);
-    } else {
-      yValue = normalizeCellValue(y[i]);
-      ok = yValue !== null;
-    }
-    if (!ok) continue;
-    for (const fv of featureValues) {
-      const raw = fv.values[i];
-      if (fv.feature.kind === 'numeric') {
-        if (toFiniteNumber(raw) === null) { ok = false; break; }
-      } else if (normalizeCellValue(raw) === null) {
-        ok = false;
-        break;
-      }
-    }
-    if (!ok) continue;
-    count += 1;
-    if (outcomeKind !== 'continuous') classCounts.set(String(yValue), (classCounts.get(String(yValue)) || 0) + 1);
-  }
-  return { count, classCounts, nClasses: classCounts.size, yUniqueNumeric: yUniqueNumeric.size };
+function updateDataMethodCard() {
+  var el = dom('dataMethodName');
+  if (!el) return;
+  var config = STATE.activeChartType ? getTestConfig(STATE.activeChartType) : null;
+  el.textContent = config ? config.name : '尚未选择方法';
 }
 
-function checkMethodAvailability(config, selectedVars) {
-  if (!config) return { available: true, reason: '' };
-
-  const cols = STATE.columns || [];
-  if (!cols.length) return { available: true, reason: '' };
-  if (!getAnalysisRows().length) return { available: false, reason: '没有可用于判定的行数据' };
-
-  const research = asArrayValue(selectedVars.research_vars);
-  const covars = asArrayValue(selectedVars.covar_vars);
-  const outcomes = asArrayValue(selectedVars.outcome_vars);
-  const predictors = [...new Set([...research, ...covars])];
-  const outcome = outcomes[0] || '';
-  const groupVar = research[0] || '';
-
-  if (!outcome) return { available: false, reason: '请先在“结局变量”中选择变量' };
-
-  const numericOutcomeReason = (minN = 3) => {
-    if (!hasNumericSignal(outcome, minN)) return `结局变量至少需要${minN}个有效数值观测且不能为常量`;
-    return '';
-  };
-
-  if (config.requiresGroup) {
-    if (!groupVar) return { available: false, reason: '需要选择研究变量作为分组变量' };
-    if (categoryLevels(groupVar).length < 2) return { available: false, reason: '研究变量至少需要2个有效分组' };
-  }
-
-  const pairedCandidate = outcomes[1] || research.find(v => v !== outcome) || '';
-
-  switch (config.id) {
-    case 'one_sample_t_test':
-    case 'normality_test': {
-      const reason = numericOutcomeReason(3);
-      if (reason) return { available: false, reason };
-      break;
-    }
-
-    case 't_test_independent':
-    case 'mann_whitney': {
-      const reason = numericOutcomeReason(3);
-      if (reason) return { available: false, reason };
-      if (categoryLevels(groupVar).length !== 2) return { available: false, reason: '该检验需要恰好2个分组' };
-      const counts = groupedNumericCounts(outcome, groupVar);
-      if ([...counts.values()].filter(n => n >= 2).length < 2) return { available: false, reason: '每组至少需要2个有效数值观测' };
-      break;
-    }
-
-    case 'levene_test':
-    case 'anova':
-    case 'kruskal_wallis': {
-      const reason = numericOutcomeReason(3);
-      if (reason) return { available: false, reason };
-      const counts = groupedNumericCounts(outcome, groupVar);
-      if ([...counts.values()].filter(n => n >= 2).length < 2) return { available: false, reason: '至少2组各有2个以上有效数值观测' };
-      break;
-    }
-
-    case 't_test_paired':
-    case 'pearson_correlation':
-    case 'spearman_correlation': {
-      if (!pairedCandidate) return { available: false, reason: '需要第二个配对/相关变量' };
-      if (pairedCandidate === outcome) return { available: false, reason: '配对变量不能与结局变量相同' };
-      const minPairs = config.id === 't_test_paired' ? 3 : 3;
-      if (pairedNumericCount(outcome, pairedCandidate) < minPairs) return { available: false, reason: `至少需要${minPairs}对完整数值观测` };
-      break;
-    }
-
-    case 'wilcoxon_signed_rank': {
-      if (!pairedCandidate) return { available: false, reason: '需要第二个配对变量' };
-      if (pairedCandidate === outcome) return { available: false, reason: '配对变量不能与结局变量相同' };
-      if (pairedNumericCount(outcome, pairedCandidate) < 5) return { available: false, reason: '至少需要5对完整数值观测' };
-      break;
-    }
-
-    case 'chi_square': {
-      const shape = contingencyShape(outcome, groupVar);
-      if (shape.rows < 2 || shape.cols < 2) return { available: false, reason: '两个分类变量均至少需要2个水平' };
-      break;
-    }
-
-    case 'fisher_exact': {
-      const shape = contingencyShape(outcome, groupVar);
-      if (shape.rows !== 2 || shape.cols !== 2) return { available: false, reason: 'Fisher精确检验仅开放2×2列联表' };
-      break;
-    }
-
-    case 'mcnemar': {
-      if (!pairedCandidate) return { available: false, reason: '需要第二个配对分类变量' };
-      if (pairedCandidate === outcome) return { available: false, reason: '配对变量不能与结局变量相同' };
-      const info = pairedCategoricalInfo(outcome, pairedCandidate);
-      if (info.count < 1 || info.levels.length < 2) return { available: false, reason: '需要完整配对分类数据且至少2个分类水平' };
-      break;
-    }
-
-    case 'log_rank': {
-      if (outcomes.length < 2) return { available: false, reason: '生存分析需在结局变量中选择“时间+事件”' };
-      const allSelected = [...new Set([...outcomes, ...research, ...covars].filter(Boolean))];
-      const timeVar = [selectedVars.time_var, ...outcomes, ...research].find(v => v && hasNumericSignal(v, 2) && /time|survival|duration|follow|天|月|时间|生存/i.test(String(v))) ||
-        [selectedVars.time_var, ...outcomes, ...research].find(v => v && hasNumericSignal(v, 2));
-      const eventVar = [selectedVars.event_var, ...allSelected].find(v => v && v !== timeVar && binaryEventInfo(v).valid);
-      if (!timeVar || !eventVar) return { available: false, reason: '需要生存时间变量和0/1事件变量' };
-      const counts = survivalGroupCounts(timeVar, eventVar, groupVar);
-      if ([...counts.values()].filter(n => n >= 2).length < 2) return { available: false, reason: '至少2组各有2个完整生存观测' };
-      break;
-    }
-
-    case 'friedman':
-    case 'repeated_measures_anova': {
-      const subjectVar = selectedVars.subject_var || [...covars, ...research, ...outcomes].find(isIdLikeForAvailability) || '';
-      if (!subjectVar) return { available: false, reason: '重复测量需在协变量中选择受试者ID' };
-      const reason = numericOutcomeReason(3);
-      if (reason) return { available: false, reason };
-      const info = repeatedCompleteSubjects(outcome, subjectVar, groupVar);
-      if (info.nGroups < 2) return { available: false, reason: '重复测量至少需要2个时间点/处理条件' };
-      if (info.complete < 3) return { available: false, reason: '至少需要3个受试者拥有所有条件的完整数值观测' };
-      break;
-    }
-
-    case 'ancova': {
-      const covar = covars.find(v => hasNumericSignal(v, 3)) || '';
-      if (!covars.length) return { available: false, reason: '需要至少1个协变量/混杂因素' };
-      if (!covar) return { available: false, reason: '协变量需包含有效连续数值变量' };
-      const reason = numericOutcomeReason(3);
-      if (reason) return { available: false, reason };
-      const info = ancovaCompleteInfo(outcome, groupVar, covar);
-      if (info.nGroups < 2) return { available: false, reason: 'ANCOVA需要至少2个有效分组' };
-      if (info.count < 10) return { available: false, reason: 'ANCOVA至少需要10个完整观测' };
-      break;
-    }
-
-    case 'logistic_regression': {
-      const features = getUsableModelFeatures(predictors, { allowCategorical: true });
-      if (features.encodedCount < 1) return { available: false, reason: '需要至少1个可入模的预测/协变量' };
-      const info = modelCompleteInfo(outcome, features.features, { outcomeKind: 'categorical' });
-      if (info.count < 20) return { available: false, reason: `样本量不足（仅${info.count}个完整观测），需要至少20个` };
-      if (info.nClasses !== 2) return { available: false, reason: 'Logistic回归结局必须是二分类变量' };
-      break;
-    }
-
-    case 'linear_regression': {
-      const features = getUsableModelFeatures(predictors, { allowCategorical: true });
-      if (features.encodedCount < 1) return { available: false, reason: '需要至少1个可入模的预测/协变量' };
-      const info = modelCompleteInfo(outcome, features.features, { outcomeKind: 'continuous' });
-      if (info.count < 20) return { available: false, reason: `样本量不足（仅${info.count}个完整观测），需要至少20个` };
-      if (info.yUniqueNumeric <= 1) return { available: false, reason: '线性回归结局变量需为有变异的连续数值变量' };
-      break;
-    }
-
-    case 'discriminant_analysis':
-    case 'quadratic_discriminant_analysis': {
-      const features = getUsableModelFeatures(predictors, { allowCategorical: false });
-      if (features.numericCount < 1) return { available: false, reason: '判别分析需要至少1个连续数值预测变量' };
-      const info = modelCompleteInfo(outcome, features.features, { outcomeKind: 'categorical' });
-      if (info.count < 20) return { available: false, reason: `样本量不足（仅${info.count}个完整观测），需要至少20个` };
-      if (info.nClasses < 2) return { available: false, reason: '判别分析结局至少需要2个类别' };
-      if (Math.min(...info.classCounts.values()) < 3) return { available: false, reason: '每个结局类别至少需要3个完整观测' };
-      break;
-    }
-
-    default: {
-      if (config.varType === 'continuous') {
-        const reason = numericOutcomeReason(3);
-        if (reason) return { available: false, reason };
-      }
-      if (config.varType === 'categorical' && categoryLevels(outcome).length < 2) {
-        return { available: false, reason: '分类结局至少需要2个水平' };
-      }
-    }
-  }
-
-  return { available: true, reason: '' };
+function updateVariableMethodCard() {
+  var el = dom('variableMethodName');
+  if (!el) return;
+  var config = STATE.activeChartType ? getTestConfig(STATE.activeChartType) : null;
+  el.textContent = config ? config.name : '尚未选择方法';
 }
 
-// ===== Variable Controls =====
-function buildVarControls() {
-  const container = el('varControls');
+function enableNextIfReady() {
+  var btn = dom('methodNextBtn');
+  if (btn) btn.disabled = !STATE.activeChartType;
+}
+
+/* ── Variables & Params (Step 3) ────────────────────────── */
+function renderVariableControls() {
+  var container = dom('roleControls');
   if (!container) return;
-
   if (!STATE.columns || STATE.columns.length === 0) {
-    container.innerHTML = '<div class="empty-state small">请先在步骤1中加载数据</div>';
-    updateWorkflowButtons();
+    container.innerHTML = '<div class="empty-state small">请先在步骤2中加载或上传数据。</div>';
     return;
   }
-
-  const cols = STATE.columns || [];
-  container.innerHTML = buildFourColumnVariablePicker(cols);
-  bindRoleTransferControls();
-  updateVariablePoolFromRoles();
-
-  $$('#varControls select').forEach(sel => {
-    sel.addEventListener('change', () => {
-      renderMiniTestGrid(STATE.activeChartCategory);
-      updateStep2DataInfo();
-      updateStep3DataInfo();
-      updateWorkflowButtons();
-    });
-    sel.addEventListener('dblclick', () => {
-      if (sel.id === 'variablePoolList') return;
-      removeSelectedFromRole(sel.id.replace('chartVar_', ''));
-    });
-  });
-  updateWorkflowButtons();
-}
-
-function buildFourColumnVariablePicker(cols) {
-  let html = '';
-  html += `<div class="var-pool-card var-transfer-card">
-    <div class="var-transfer-head">
-      <label class="form-label var-role-label">所有变量</label>
-      <span class="var-transfer-count" id="poolVarCount">${cols.length}</span>
-    </div>
-    <select id="variablePoolList" class="hidden-role-select" multiple>
-      ${(cols || []).map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}${getVariableTypeBadgeText(c)}</option>`).join('')}
-    </select>
-    <div id="visual_pool" class="var-visual-list" data-role="pool"></div>
-    <small class="form-hint">单击可多选；也可按住鼠标拖拽一个或多个变量到右侧角色栏。</small>
-  </div>`;
-
-  html += buildTransferRoleCard('research_vars', '研究变量',
-    '暴露因素、分组变量、处理组、主要自变量或模型预测变量。');
-  html += buildTransferRoleCard('covar_vars', '协变量 / 混杂因素',
-    '年龄、性别、BMI、基线值、受试者ID等需要控制或辅助建模的变量。');
-  html += buildTransferRoleCard('outcome_vars', '结局变量',
-    '主要终点、响应变量、被解释变量；生存分析请选择“生存时间”和“事件变量(0/1)”。');
-
-  html += `<div class="var-screen-note">
-    <strong>选择规则：</strong>左侧为数据集全部变量；右侧三栏支持“+ / −”移动，也支持单个或多个变量直接拖拽。三个角色均支持单选和多选；如果变量类型和统计方法不匹配，对应方法会自动变灰。
-  </div>`;
-  return html;
-}
-
-function buildTransferRoleCard(id, label, hint) {
-  const elementId = `chartVar_${id}`;
-  return `<div class="form-group var-role-card var-transfer-card" data-role="${id}">
-    <div class="var-transfer-head">
-      <label class="form-label var-role-label">${escapeHtml(label)}</label>
-      <div class="var-transfer-actions">
-        <button type="button" class="var-transfer-btn add" data-action="add" data-target="${id}" title="添加到${escapeHtml(label)}">+</button>
-        <button type="button" class="var-transfer-btn remove" data-action="remove" data-target="${id}" title="从${escapeHtml(label)}移除">−</button>
-      </div>
-    </div>
-    <select id="${elementId}" class="hidden-role-select" multiple></select>
-    <div id="visual_${id}" class="var-visual-list" data-role="${id}"></div>
-    <small class="form-hint">${escapeHtml(hint)}</small>
-  </div>`;
-}
-
-function bindRoleTransferControls() {
-  $$('.var-transfer-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const role = btn.dataset.target;
-      if (btn.dataset.action === 'add') addSelectedToRole(role);
-      else removeSelectedFromRole(role);
-    });
-  });
-  renderVariableVisualLists();
-  bindVariableVisualEvents();
-}
-
-function hiddenSelectForRole(role) {
-  if (role === 'pool') return el('variablePoolList');
-  return el(`chartVar_${role}`);
-}
-
-function visualListForRole(role) {
-  return el(`visual_${role}`);
-}
-
-function getOptionLabel(value) {
-  return `${value}${getVariableTypeBadgeText(value)}`;
-}
-
-function optionExists(selectEl, value) {
-  return !!selectEl && [...selectEl.options].some(o => o.value === value);
-}
-
-function addOptionSorted(selectEl, value) {
-  if (!selectEl || !value || optionExists(selectEl, value)) return;
-  const opt = document.createElement('option');
-  opt.value = value;
-  opt.textContent = getOptionLabel(value);
-  selectEl.appendChild(opt);
-  sortSelectOptions(selectEl);
-}
-
-function removeOptionByValue(selectEl, value) {
-  if (!selectEl) return;
-  [...selectEl.options].forEach(o => { if (o.value === value) o.remove(); });
-}
-
-function sortSelectOptions(selectEl) {
-  if (!selectEl) return;
-  const order = new Map((STATE.columns || []).map((c, i) => [c, i]));
-  const opts = [...selectEl.options].sort((a, b) => (order.get(a.value) ?? 9999) - (order.get(b.value) ?? 9999));
-  selectEl.innerHTML = '';
-  opts.forEach(o => selectEl.appendChild(o));
-}
-
-function renderVariableVisualLists() {
-  ['pool', 'research_vars', 'covar_vars', 'outcome_vars'].forEach(role => {
-    const selectEl = hiddenSelectForRole(role);
-    const visual = visualListForRole(role);
-    if (!selectEl || !visual) return;
-    const values = [...selectEl.options].map(o => o.value);
-    visual.innerHTML = values.map(value => `
-      <div class="var-chip-item" draggable="true" data-var="${escapeHtml(value)}" title="${escapeHtml(value)}">
-        <span class="var-chip-name">${escapeHtml(value)}</span>
-        <span class="var-chip-type">${escapeHtml(getColumnType(value) || '变量')}</span>
-      </div>`).join('');
-    if (!values.length) {
-      visual.innerHTML = '<div class="var-empty-tip">拖拽变量到这里</div>';
-    }
-  });
-  const count = el('poolVarCount');
-  const pool = el('variablePoolList');
-  if (count && pool) count.textContent = pool.options.length;
-}
-
-function bindVariableVisualEvents() {
-  $$('.var-visual-list').forEach(list => {
-    if (list.dataset.bound === '1') return;
-    list.dataset.bound = '1';
-    list.addEventListener('click', ev => {
-      const item = ev.target.closest('.var-chip-item');
-      if (!item) return;
-      if (!ev.ctrlKey && !ev.metaKey && !ev.shiftKey) {
-        // 普通单击也支持多选：不清空同栏已有选择，方便新手直接连续点选。
-      }
-      item.classList.toggle('selected');
-    });
-
-    list.addEventListener('dblclick', ev => {
-      const item = ev.target.closest('.var-chip-item');
-      if (!item) return;
-      const role = list.dataset.role;
-      if (role === 'pool') return;
-      moveVariables([item.dataset.var], role, 'pool');
-    });
-
-    list.addEventListener('dragstart', ev => {
-      const item = ev.target.closest('.var-chip-item');
-      if (!item) return;
-      const role = list.dataset.role;
-      const selected = getSelectedVisualValues(role);
-      const values = selected.includes(item.dataset.var) ? selected : [item.dataset.var];
-      ev.dataTransfer.setData('application/json', JSON.stringify({ sourceRole: role, values }));
-      ev.dataTransfer.setData('text/plain', values.join('\n'));
-      ev.dataTransfer.effectAllowed = 'move';
-      item.classList.add('dragging');
-      list.classList.add('drag-source');
-    });
-
-    list.addEventListener('dragend', () => {
-      $$('.var-visual-list').forEach(x => x.classList.remove('drag-source', 'drag-over'));
-      $$('.var-chip-item.dragging').forEach(x => x.classList.remove('dragging'));
-    });
-
-    ['dragenter', 'dragover'].forEach(evt => {
-      list.addEventListener(evt, ev => {
-        ev.preventDefault();
-        list.classList.add('drag-over');
-        ev.dataTransfer.dropEffect = 'move';
-      });
-    });
-
-    list.addEventListener('dragleave', ev => {
-      if (!list.contains(ev.relatedTarget)) list.classList.remove('drag-over');
-    });
-
-    list.addEventListener('drop', ev => {
-      ev.preventDefault();
-      list.classList.remove('drag-over');
-      let payload = null;
-      try { payload = JSON.parse(ev.dataTransfer.getData('application/json') || '{}'); } catch (_) { payload = null; }
-      const values = (payload?.values || ev.dataTransfer.getData('text/plain').split(/\n|,/)).map(v => String(v).trim()).filter(Boolean);
-      const sourceRole = payload?.sourceRole || 'pool';
-      const targetRole = list.dataset.role || 'pool';
-      if (values.length) moveVariables(values, sourceRole, targetRole);
-    });
-  });
-}
-
-function getSelectedVisualValues(role) {
-  const visual = visualListForRole(role);
-  if (!visual) return [];
-  return [...visual.querySelectorAll('.var-chip-item.selected')].map(x => x.dataset.var).filter(Boolean);
-}
-
-function removeVariableFromAllRoles(value, exceptRole) {
-  ['research_vars', 'covar_vars', 'outcome_vars'].forEach(role => {
-    if (role === exceptRole) return;
-    removeOptionByValue(hiddenSelectForRole(role), value);
-  });
-}
-
-function moveVariables(values, sourceRole, targetRole) {
-  const unique = [...new Set((values || []).filter(Boolean))];
-  if (!unique.length || sourceRole === targetRole) return;
-  unique.forEach(value => {
-    if (targetRole === 'pool') {
-      ['research_vars', 'covar_vars', 'outcome_vars'].forEach(role => removeOptionByValue(hiddenSelectForRole(role), value));
-      addOptionSorted(hiddenSelectForRole('pool'), value);
-    } else {
-      removeVariableFromAllRoles(value, targetRole);
-      removeOptionByValue(hiddenSelectForRole('pool'), value);
-      addOptionSorted(hiddenSelectForRole(targetRole), value);
-    }
-    if (sourceRole && sourceRole !== targetRole) removeOptionByValue(hiddenSelectForRole(sourceRole), value);
-  });
-  refreshVariableSelectionAfterMove();
-}
-
-function addSelectedToRole(role) {
-  const selected = getSelectedVisualValues('pool');
-  if (!selected.length) {
-    toast('请先在“所有变量”中选择变量，或直接拖拽到右侧栏', 'warning');
-    return;
-  }
-  moveVariables(selected, 'pool', role);
-}
-
-function removeSelectedFromRole(role) {
-  const selected = getSelectedVisualValues(role);
-  if (!selected.length) {
-    toast('请先在该变量栏中选择要移除的变量，或直接拖回“所有变量”', 'warning');
-    return;
-  }
-  moveVariables(selected, role, 'pool');
-}
-
-function updateVariablePoolFromRoles() {
-  const pool = hiddenSelectForRole('pool');
-  if (!pool) return;
-  const selected = new Set();
-  ['research_vars', 'covar_vars', 'outcome_vars'].forEach(role => {
-    const sel = hiddenSelectForRole(role);
-    if (!sel) return;
-    [...sel.options].forEach(o => selected.add(o.value));
-  });
-  [...pool.options].forEach(o => { if (selected.has(o.value)) o.remove(); });
-  const count = el('poolVarCount');
-  if (count) count.textContent = pool.options.length;
-}
-
-function refreshVariableSelectionAfterMove() {
-  updateVariablePoolFromRoles();
-  ['pool', 'research_vars', 'covar_vars', 'outcome_vars'].forEach(role => sortSelectOptions(hiddenSelectForRole(role)));
-  renderVariableVisualLists();
-  bindVariableVisualEvents();
-  renderMiniTestGrid(STATE.activeChartCategory);
-  updateStep2DataInfo();
-  updateStep3DataInfo();
-  updateWorkflowButtons();
-}
-
-function getVariableTypeBadgeText(col) {
-  const t = getColumnType(col);
-  const map = {
-    continuous: '  · 连续', numeric: '  · 数值', date: '  · 日期', time: '  · 时间',
-    categorical: '  · 分类', binary: '  · 二分类', group: '  · 分组', outcome_candidate: '  · 结局候选',
-    ordinal_categorical: '  · 有序分类', id: '  · ID', region: '  · 地区'
-  };
-  return map[t] || '';
-}
-
-function updateStep2DataInfo() {
-  // removed per user request
-}
-
-function updateRunPanel() {
-  const summary = el('runConfigSummary');
-  if (!summary) return;
-  const config = getTestConfig(STATE.activeChartType);
-  const vars = collectSelectedVars();
-  const hasData = STATE.columns && STATE.columns.length > 0;
-  if (!hasData) {
-    summary.innerHTML = '<div class="empty-state">请先加载示例或上传数据，然后选择统计方法与变量</div>';
-    return;
-  }
+  var config = STATE.activeChartType ? getTestConfig(STATE.activeChartType) : null;
   if (!config) {
-    summary.innerHTML = '<div class="empty-state">请先在「方案选择」中选定一个统计检验方法</div>';
-    return;
-  }
-  const lines = [];
-  lines.push(`<strong>检验方法：</strong>${escapeHtml(config.name)}`);
-  if (config.description) lines.push(`<small>${escapeHtml(config.description)}</small>`);
-  if (vars.var) lines.push(`<strong>分析变量：</strong>${escapeHtml(vars.var)}`);
-  if (vars.group_var) lines.push(`<strong>分组变量：</strong>${escapeHtml(vars.group_var)}`);
-  const research = asArrayValue(vars.research_vars).filter(Boolean);
-  if (research.length) lines.push(`<strong>研究变量：</strong>${escapeHtml(research.join('、'))}`);
-  const covars = asArrayValue(vars.covar_vars).filter(Boolean);
-  if (covars.length) lines.push(`<strong>协变量：</strong>${escapeHtml(covars.join('、'))}`);
-  if (vars.paired_var) lines.push(`<strong>配对变量：</strong>${escapeHtml(vars.paired_var)}`);
-  const outcomes = asArrayValue(vars.outcome_vars).filter(Boolean);
-  if (outcomes.length) lines.push(`<strong>结局变量：</strong>${escapeHtml(outcomes.join('、'))}`);
-  if (STATE.rowCount) lines.push(`<strong>数据规模：</strong>${STATE.rowCount} 行 × ${STATE.colCount} 列`);
-  summary.innerHTML = lines.length > 1
-    ? lines.map(l => `<div style="margin:4px 0">${l}</div>`).join('')
-    : '<div class="empty-state">请完成变量配置后点击左侧「开始分析」按钮</div>';
-}
-
-function updateStep3DataInfo() {
-  const el3 = el('step3DataInfo');
-  if (!el3) return;
-  const hasData = STATE.columns && STATE.columns.length > 0;
-  if (!hasData) { el3.textContent = '请先完成变量选择'; return; }
-
-  const avail = STATE.methodAvailability || {};
-  const disabledCount = Object.values(avail).filter(v => v && !v.available).length;
-  if (disabledCount > 0) {
-    el3.textContent = `${Object.keys(avail).length - disabledCount}/${Object.keys(avail).length} 种方法可用（${disabledCount} 种不适用）`;
-  } else {
-    el3.textContent = '所有方法均可用';
-  }
-}
-
-// ===== Theme Selector =====
-function setupThemeSelector() {
-  const sel = el('chartThemeSelect');
-  if (sel) {
-    sel.value = STATE.chartTheme || 'cnsTheme';
-    sel.addEventListener('change', () => {
-      STATE.chartTheme = sel.value;
-      STATE.userColors = null;
-      renderAppearanceControls();
-      toast('主题: ' + (typeof CHART_THEMES !== 'undefined' && CHART_THEMES[sel.value]?.name || sel.value), 'info');
-      refreshCurrentVisualization();
-    });
-  }
-
-  const titleInput = el('chartTitleInput');
-  if (titleInput && !titleInput.dataset.boundStatTitleRefresh) {
-    titleInput.dataset.boundStatTitleRefresh = 'true';
-    let titleTimer = null;
-    titleInput.addEventListener('input', () => {
-      clearTimeout(titleTimer);
-      titleTimer = setTimeout(() => refreshCurrentVisualization(), 220);
-    });
-  }
-}
-
-function refreshCurrentVisualization() {
-  // 图形参数调节只重绘当前激活图形，不能重新执行统计图生成；
-  // 否则多图切换中的 activeStatChartVariantIndex 会被重置为 0，表现为一调参数就跳回第一张图。
-  if (STATE.currentPlotlyDataRaw && STATE.currentPlotlyDataRaw.length > 0) {
-    if (STATE.activeWsTab === 'chart') renderChart(STATE.currentPlotlyDataRaw, STATE.currentPlotlyLayoutRaw || STATE.currentPlotlyLayout || {});
-    return true;
-  }
-  if (STATE.currentPlotlyData && STATE.currentPlotlyData.length > 0) {
-    if (STATE.activeWsTab === 'chart') renderChart(STATE.currentPlotlyData, STATE.currentPlotlyLayout || {});
-    return true;
-  }
-  if (typeof rerenderCurrentStatChart === 'function' && rerenderCurrentStatChart()) return true;
-  return false;
-}
-
-// ===== Post Hoc =====
-function setupPostHocSelect() {
-  const sel = el('postHocSelect');
-  if (!sel) return;
-  sel.addEventListener('change', () => { STATE.postHocMethod = sel.value || null; });
-}
-
-function updatePostHocSection() {
-  const section = el('postHocSection');
-  if (!section) return;
-  const config = getTestConfig(STATE.activeChartType);
-  section.hidden = !(config && config.supportsPostHoc);
-}
-
-// ===== Data Meta =====
-function updateDataMeta() {
-  // removed per user request
-}
-
-function updateDownloadList() {
-  const list = el('downloadList');
-  if (!list) return;
-  const hasResult = !!STATE.currentResult;
-  if (hasResult) {
-    list.className = 'download-list';
-    list.innerHTML = `
-      <a class="download-link" href="/api/examples/comprehensive_example/download" download><span>下载示例数据</span><small>综合临床 CSV</small></a>
-      <a class="download-link" href="#" onclick="event.preventDefault();exportTableExcel();"><span>导出 Excel</span><small>结果表格</small></a>
-      <a class="download-link" href="#" onclick="event.preventDefault();exportTableCSV();"><span>导出 CSV</span><small>结果表格</small></a>
-    `;
-  } else if (STATE.columns && STATE.columns.length > 0) {
-    list.className = 'download-list';
-    list.innerHTML = `<a class="download-link" href="/api/examples/comprehensive_example/download" download><span>下载示例数据</span><small>综合临床 CSV</small></a>`;
-  } else {
-    list.className = 'download-list empty';
-    list.innerHTML = '加载数据后可下载示例，分析完成后可导出结果';
-  }
-}
-
-// ===== Metric Grid =====
-function updateMetricGrid() {
-  const grid = el('metricGrid');
-  if (!grid) return;
-  const hasData = STATE.columns && STATE.columns.length > 0;
-  const summary = STATE.summary || {};
-  const config = typeof getTestConfig === 'function' ? getTestConfig(STATE.activeChartType) : null;
-
-  grid.innerHTML = `
-    <div class="summary-card"><span>N</span><strong>${hasData ? (STATE.rowCount || '—') : '--'}</strong><small>样本</small></div>
-    <div class="summary-card"><span>Vars</span><strong>${hasData ? (STATE.colCount || '—') : '--'}</strong><small>变量</small></div>
-    <div class="summary-card"><span>Missing</span><strong>${hasData ? (summary.missing_percent || '—') : '--'}</strong><small>缺失%</small></div>
-    <div class="summary-card"><span>Method</span><strong>${config ? config.icon : '--'}</strong><small>${config ? config.name : '—'}</small></div>
-  `;
-}
-
-// ===== Preview Table =====
-function updatePreviewTable() {
-  const target = el('previewTable');
-  if (!target) return;
-  const rows = STATE.previewRows || [];
-  const cols = STATE.columns || [];
-
-  if (!rows.length || !cols.length) {
-    target.innerHTML = '<div class="empty-state">请先在左侧步骤 1 中加载数据</div>';
+    container.innerHTML = '<div class="empty-state small">请先在步骤1中选择统计方法。</div>';
     return;
   }
 
-  const displayCols = cols.slice(0, 12);
-  let html = '<table class="three-line"><thead><tr>';
-  displayCols.forEach(c => { html += `<th>${escapeHtml(String(c))}</th>`; });
-  html += '</tr></thead><tbody>';
-  const showRows = rows.slice(0, 30);
-  showRows.forEach(row => {
-    html += '<tr>';
-    displayCols.forEach(c => {
-      const v = row[c];
-      html += `<td>${v !== undefined && v !== null ? escapeHtml(String(v)) : ''}</td>`;
-    });
-    html += '</tr>';
-  });
-  const totalRows = STATE.rowCount || rows.length;
-  if (totalRows > showRows.length) html += `<caption>显示前 ${showRows.length} 行 / 共 ${totalRows} 行</caption>`;
-  html += '</tbody></table>';
-  target.innerHTML = html;
+  var allCols = STATE.columns;
+  var colOptions = allCols.map(function(c) { return '<option value="' + escapeHtml(c) + '">' + escapeHtml(c) + '</option>'; }).join('');
 
-  // Update previewNextBtn
-  const btn = el('previewNextBtn');
-  if (btn) btn.disabled = false;
-  updateWorkflowButtons();
-}
-
-// ===== Dataset Meta =====
-function updateDatasetMeta() {
-  const meta = el('datasetMeta');
-  if (!meta) return;
-  const hasData = STATE.columns && STATE.columns.length > 0;
-  meta.textContent = hasData
-    ? `${STATE.fileName || STATE.datasetName || '已载入'} · ${STATE.rowCount || 0} 行 × ${STATE.colCount || 0} 列`
-    : '未载入数据';
-}
-
-// ===== Reset Results =====
-function resetResults() {
-  STATE.currentStatResult = null;
-  STATE.currentStatChartData = null;
-
-  const summaryContainer = el('resultSummary');
-  if (summaryContainer) {
-    summaryContainer.innerHTML = '<div class="empty-state">请选择统计方法并执行分析</div>';
-  }
-  ['resultTableContainer', 'groupStatsContainer', 'postHocContainer', 'descriptiveTableContainer'].forEach(id => {
-    const c = el(id); if (c) c.innerHTML = '';
-  });
-
-  const exportBar = el('analysisExportBar');
-  if (exportBar) exportBar.style.display = 'none';
-  const unifiedExportBar = el('resultUnifiedExportBar');
-  if (unifiedExportBar) unifiedExportBar.hidden = true;
-  const chartExportBar = el('chartExportBar');
-  if (chartExportBar) chartExportBar.hidden = true;
-
-  const chartContainer = el('chartPreviewContainer');
-  if (chartContainer) {
-    const oldPlot = chartContainer.querySelector('.js-plotly-plot');
-    if (oldPlot && window.Plotly) Plotly.purge(oldPlot);
-    chartContainer.innerHTML = '<div class="empty-state">完成分析后选择图形预览</div>';
-  }
-
-  const badge = el('chartPreviewBadge');
-  if (badge) badge.style.display = 'none';
-  const variantBar = el('chartVariantBar');
-  if (variantBar) { variantBar.hidden = true; variantBar.innerHTML = ''; }
-}
-
-// ===== Appearance Controls =====
-function normalizeColorInputValue(value, fallback = '#ffffff') {
-  const v = String(value || '').trim();
-  if (/^#[0-9a-fA-F]{6}$/.test(v)) return v;
-  if (/^#[0-9a-fA-F]{3}$/.test(v)) {
-    return '#' + v.slice(1).split('').map(ch => ch + ch).join('');
-  }
-  return fallback;
-}
-
-function getCurrentChartFeatureFlags() {
-  const traces = (STATE.currentPlotlyDataRaw && STATE.currentPlotlyDataRaw.length ? STATE.currentPlotlyDataRaw : STATE.currentPlotlyData) || [];
-  const clean = (traces || []).filter(t => t && !(typeof isDecorativeTrace === 'function' && isDecorativeTrace(t)));
-  const flags = { hasMarkers: false, hasLines: false, hasBars: false, hasDistribution: false, hasFill: false, hasPie: false };
-  clean.forEach(t => {
-    const type = String(t.type || 'scatter');
-    const mode = String(t.mode || '');
-    if (type === 'bar' || type === 'histogram' || type === 'barpolar') flags.hasBars = true;
-    if (type === 'barpolar') flags.hasLines = true;
-    if (['box', 'violin'].includes(type)) flags.hasDistribution = true;
-    if (['pie', 'funnel', 'treemap'].includes(type)) flags.hasPie = true;
-    if (type === 'scatter') {
-      if (mode.includes('markers') || !mode || mode === 'markers') flags.hasMarkers = true;
-      if (mode.includes('lines')) flags.hasLines = true;
-      if (t.fill && t.fill !== 'none') flags.hasFill = true;
+  function defResearch() {
+    if (typeof getTestDefaultParams === 'function') {
+      var defs = getTestDefaultParams(STATE.activeChartType);
+      var candidates = [];
+      if (defs.x_var && allCols.indexOf(defs.x_var) >= 0) candidates.push(defs.x_var);
+      if (defs.group_var && allCols.indexOf(defs.group_var) >= 0) candidates.push(defs.group_var);
+      if (defs.treatment_var && allCols.indexOf(defs.treatment_var) >= 0) candidates.push(defs.treatment_var);
+      if (defs.time_var && allCols.indexOf(defs.time_var) >= 0) candidates.push(defs.time_var);
+      if (!candidates.length && defs.y_var && allCols.indexOf(defs.y_var) >= 0) candidates.push(defs.y_var);
+      return candidates;
     }
-    if (Array.isArray(t.marker?.size) || t.marker || type === 'scattergl') {
-      if (type !== 'bar' && type !== 'histogram') flags.hasMarkers = flags.hasMarkers || mode.includes('markers');
+    return [];
+  }
+  function defOutcomes() {
+    if (typeof getTestDefaultParams === 'function') {
+      var defs = getTestDefaultParams(STATE.activeChartType);
+      var candidates = [];
+      if (defs.y_var && allCols.indexOf(defs.y_var) >= 0) candidates.push(defs.y_var);
+      if (defs['var'] && allCols.indexOf(defs['var']) >= 0) candidates.push(defs['var']);
+      if (defs.outcome_var && allCols.indexOf(defs.outcome_var) >= 0) candidates.push(defs.outcome_var);
+      if (defs.paired_var && allCols.indexOf(defs.paired_var) >= 0) candidates.push(defs.paired_var);
+      if (defs.event_var && allCols.indexOf(defs.event_var) >= 0) candidates.push(defs.event_var);
+      return candidates;
     }
-  });
-  return flags;
-}
-
-function renderAppearanceControls() {
-  const container = el('appearanceControls');
-  if (!container) return;
-
-  const theme = (typeof CHART_THEMES !== 'undefined' && typeof getActiveTheme === 'function')
-    ? getActiveTheme() : null;
-  const palette = (theme && theme.colorway)
-    ? theme.colorway
-    : ['#3f73c8', '#c0616e', '#55998b', '#c8922a', '#6F5AA7', '#7C8B52'];
-
-  const ctx = typeof getCurrentAppearanceContext === 'function'
-    ? getCurrentAppearanceContext(STATE.currentChartKind)
-    : { targets: [], styleOptions: [{ id: 'solid', label: '标准' }], maxColors: 0 };
-  STATE.currentAppearanceContext = ctx;
-  const flags = getCurrentChartFeatureFlags();
-  const targetCount = ctx.maxColors || 0;
-  const targets = ctx.targets || [];
-  const styleOptions = ctx.styleOptions || [{ id: 'solid', label: '标准' }];
-  const validStyleIds = styleOptions.map(o => o.id);
-  if (!validStyleIds.includes(STATE.chartVisualStyle)) STATE.chartVisualStyle = styleOptions[0].id;
-
-  if (targetCount > 0) {
-    const nextColors = Array.isArray(STATE.userColors) ? STATE.userColors.slice(0, targetCount) : [];
-    while (nextColors.length < targetCount) nextColors.push(palette[nextColors.length % palette.length]);
-    STATE.userColors = nextColors;
-  } else {
-    STATE.userColors = null;
+    return [];
+  }
+  function defCovars() {
+    if (typeof getTestDefaultParams === 'function') {
+      var defs = getTestDefaultParams(STATE.activeChartType);
+      var candidates = [];
+      if (defs.subject_var && allCols.indexOf(defs.subject_var) >= 0) candidates.push(defs.subject_var);
+      if (defs.covar && allCols.indexOf(defs.covar) >= 0) candidates.push(defs.covar);
+      if (defs.x_vars && Array.isArray(defs.x_vars)) defs.x_vars.forEach(function(v) { if (allCols.indexOf(v) >= 0) candidates.push(v); });
+      if (defs.value_vars && Array.isArray(defs.value_vars)) defs.value_vars.forEach(function(v) { if (allCols.indexOf(v) >= 0) candidates.push(v); });
+      return candidates;
+    }
+    return [];
   }
 
-  let html = '';
-  html += '<div class="appearance-section compact-appearance-section">';
-  html += '<label class="appearance-label">图形风格</label>';
-  html += `<div class="style-preset-row">${styleOptions.map(opt => `<button type="button" class="style-preset-btn ${STATE.chartVisualStyle === opt.id ? 'active' : ''}" data-style-id="${opt.id}">${opt.label}</button>`).join('')}</div>`;
+  var researchDefaults = defResearch();
+  var outcomeDefaults = defOutcomes();
+  var covarDefaults = defCovars();
+  var savedRecommendations = (STATE.methodRoleRecommendations && STATE.methodRoleRecommendations[STATE.activeChartType]) || null;
+  if (savedRecommendations) {
+    researchDefaults = savedRecommendations.research_vars || researchDefaults;
+    outcomeDefaults = savedRecommendations.outcome_vars || outcomeDefaults;
+    covarDefaults = savedRecommendations.covar_vars || covarDefaults;
+  }
+
+  var html = '';
+
+  // 研究变量 (exposure / grouping / predictor)
+  html += '<div class="role-box"><span>研究变量</span><small>（分组 / 处理 / 预测因子）</small>';
+  html += '<select class="role-select" data-role="research_vars" multiple style="min-height:70px">' + colOptions + '</select>';
   html += '</div>';
 
-  const bgPreset = STATE.chartBgPreset || 'white';
-  const gridMode = STATE.chartGridMode || 'grid';
-  html += `<div class="appearance-section compact-appearance-section">
-    <label class="appearance-label">背景与网格</label>
-    <div class="bg-control-grid bg-control-grid-v88">
-      <label><span>背景</span>
-        <select id="chartBgPresetSelect" class="form-select compact-control">
-          <option value="white" ${bgPreset === 'white' ? 'selected' : ''}>白色背景</option>
-          <option value="transparent" ${bgPreset === 'transparent' ? 'selected' : ''}>透明背景</option>
-        </select>
-      </label>
-      <label><span>网格线</span>
-        <select id="chartGridModeSelect" class="form-select compact-control">
-          <option value="grid" ${gridMode === 'grid' ? 'selected' : ''}>显示</option>
-          <option value="blank" ${gridMode === 'blank' ? 'selected' : ''}>隐藏</option>
-        </select>
-      </label>
-    </div>
-  </div>`;
+  // 协变量 / 混杂因素
+  html += '<div class="role-box"><span>协变量 / 混杂因素</span><small>（校正变量 / 受试者 ID / 附加预测）</small>';
+  html += '<select class="role-select" data-role="covar_vars" multiple style="min-height:70px">' + colOptions + '</select>';
+  html += '</div>';
 
-  if (targetCount > 0) {
-    html += '<div class="appearance-section">';
-    html += `<label class="appearance-label">配色映射（${targetCount} 项）</label>`;
-    html += '<div class="color-picker-grid" id="colorPickerRow">';
-    targets.forEach((target, i) => {
-      const c = (STATE.userColors && STATE.userColors[i]) || palette[i % palette.length];
-      html += `
-        <label class="color-target-card">
-          <span class="color-target-name" title="${target.label}">${target.label}</span>
-          <span class="color-target-meta">${target.mode === 'point' ? '单项' : '系列'}</span>
-          <input type="color" class="color-swatch" data-idx="${i}" value="${c}" title="${target.label}">
-        </label>`;
-    });
-    html += '<button class="color-reset-btn" id="resetColorsBtn">重置颜色</button>';
-    html += '</div></div>';
-  }
-
-  if (flags.hasBars) {
-    const bw = STATE.barWidth || 0.62;
-    html += `<div class="appearance-section"><label class="appearance-label">柱体宽度</label>
-      <div class="slider-row"><input type="range" id="barWidthInput" min="0.2" max="0.95" step="0.05" value="${bw}" class="app-slider">
-      <span class="slider-val" id="barWidthVal">${bw}</span></div></div>`;
-  }
-
-  if (flags.hasMarkers) {
-    const ms = STATE.markerSize || 8;
-    html += `<div class="appearance-section"><label class="appearance-label">点 / 标记大小</label>
-      <div class="slider-row"><input type="range" id="markerSizeInput" min="3" max="20" value="${ms}" class="app-slider">
-      <span class="slider-val" id="markerSizeVal">${ms}</span></div></div>`;
-
-    const markerShape = STATE.markerShape || 'circle';
-    html += `<div class="appearance-section"><label class="appearance-label">标记形状</label>
-      <select id="markerShapeSelect" class="form-select compact-control">
-        <option value="circle" ${markerShape === 'circle' ? 'selected' : ''}>圆点</option>
-        <option value="circle-open" ${markerShape === 'circle-open' ? 'selected' : ''}>空心圆</option>
-        <option value="square" ${markerShape === 'square' ? 'selected' : ''}>方形</option>
-        <option value="diamond" ${markerShape === 'diamond' ? 'selected' : ''}>菱形</option>
-        <option value="cross" ${markerShape === 'cross' ? 'selected' : ''}>十字</option>
-        <option value="x" ${markerShape === 'x' ? 'selected' : ''}>X 形</option>
-        <option value="triangle-up" ${markerShape === 'triangle-up' ? 'selected' : ''}>三角形</option>
-      </select></div>`;
-  }
-
-  if (flags.hasLines || flags.hasDistribution) {
-    const lw = STATE.lineWidth || 2.5;
-    html += `<div class="appearance-section"><label class="appearance-label">${flags.hasDistribution && !flags.hasLines ? '边框线宽' : '线条宽度'}</label>
-      <div class="slider-row"><input type="range" id="lineWidthInput" min="0.5" max="8" step="0.5" value="${lw}" class="app-slider">
-      <span class="slider-val" id="lineWidthVal">${lw}</span></div></div>`;
-  }
-
-  if (flags.hasMarkers || flags.hasBars || flags.hasDistribution || flags.hasFill || flags.hasPie) {
-    const op = STATE.markerOpacity != null ? STATE.markerOpacity : 0.88;
-    html += `<div class="appearance-section"><label class="appearance-label">透明度</label>
-      <div class="slider-row"><input type="range" id="markerOpacityInput" min="0.1" max="1" step="0.05" value="${op}" class="app-slider">
-      <span class="slider-val" id="markerOpacityVal">${op}</span></div></div>`;
-  }
-
-  if (!flags.hasMarkers && !flags.hasLines && !flags.hasBars && !flags.hasDistribution && !flags.hasPie && !targetCount) {
-    html += '<div class="appearance-section"><div class="empty-state" style="min-height:72px;">当前图形无可调节的点、线或柱体元素。</div></div>';
-  }
+  // 结局变量
+  html += '<div class="role-box"><span>结局变量</span><small>（响应 / 配对第二指标 / 生存时间-事件对）</small>';
+  html += '<select class="role-select" data-role="outcome_vars" multiple style="min-height:70px">' + colOptions + '</select>';
+  html += '</div>';
 
   container.innerHTML = html;
 
-  $$('.style-preset-btn', container).forEach(btn => {
-    btn.addEventListener('click', () => {
-      STATE.chartVisualStyle = btn.dataset.styleId;
-      if (typeof renderChartVariantBar === 'function') renderChartVariantBar();
-      renderAppearanceControls();
-      refreshCurrentVisualization();
-    });
-  });
+  setRoleSelections({
+    research_vars: researchDefaults,
+    outcome_vars: outcomeDefaults,
+    covar_vars: covarDefaults,
+  }, container);
+}
 
-  $$('.color-swatch', container).forEach(input => {
-    input.addEventListener('input', (e) => {
-      if (!STATE.userColors) STATE.userColors = [];
-      STATE.userColors[Number(e.target.dataset.idx)] = e.target.value;
-      refreshCurrentVisualization();
-    });
-    input.addEventListener('change', () => refreshCurrentVisualization());
-  });
-
-  const bgPresetSelect = el('chartBgPresetSelect');
-  if (bgPresetSelect) bgPresetSelect.addEventListener('change', () => {
-    STATE.chartBgPreset = bgPresetSelect.value || 'white';
-    if (STATE.chartBgPreset === 'transparent') {
-      STATE.chartPlotBg = 'rgba(255,255,255,0)';
-      STATE.chartPaperBg = 'rgba(255,255,255,0)';
-    } else {
-      STATE.chartPlotBg = '#ffffff';
-      STATE.chartPaperBg = '#ffffff';
+function setRoleSelections(roles, root) {
+  var container = root || dom('roleControls');
+  if (!container || !roles) return false;
+  var didApply = false;
+  domAll('.role-select', container).forEach(function(sel) {
+    var role = sel.dataset.role;
+    var values = [];
+    if (role === 'research_vars') values = roles.research_vars || [];
+    else if (role === 'outcome_vars') values = roles.outcome_vars || [];
+    else if (role === 'covar_vars') values = roles.covar_vars || [];
+    values = values.filter(Boolean);
+    for (var i = 0; i < sel.options.length; i++) {
+      var shouldSelect = values.indexOf(sel.options[i].value) >= 0;
+      sel.options[i].selected = shouldSelect;
+      if (shouldSelect) didApply = true;
     }
-    refreshCurrentVisualization();
   });
+  return didApply;
+}
 
-  const gridModeSelect = el('chartGridModeSelect');
-  if (gridModeSelect) gridModeSelect.addEventListener('change', () => {
-    STATE.chartGridMode = gridModeSelect.value || 'grid';
-    refreshCurrentVisualization();
-  });
-
-  const resetBtn = el('resetColorsBtn');
-  if (resetBtn) resetBtn.addEventListener('click', () => {
-    STATE.userColors = null;
-    renderAppearanceControls();
-    refreshCurrentVisualization();
-  });
-
-  const markerShapeSelect = el('markerShapeSelect');
-  if (markerShapeSelect) markerShapeSelect.addEventListener('change', () => {
-    STATE.markerShape = markerShapeSelect.value || 'circle';
-    refreshCurrentVisualization();
-  });
-
-  ['markerSizeInput', 'lineWidthInput', 'markerOpacityInput', 'barWidthInput'].forEach(id => {
-    const slider = el(id); if (!slider) return;
-    const applySliderState = () => {
-      const valSpan = el(id.replace('Input', 'Val')); if (valSpan) valSpan.textContent = slider.value;
-      if (id === 'markerSizeInput') STATE.markerSize = Number(slider.value);
-      else if (id === 'lineWidthInput') STATE.lineWidth = Number(slider.value);
-      else if (id === 'barWidthInput') {
-        STATE.barWidth = Number(slider.value);
-        // 对 histogram，宽度改为同步驱动 bargap，避免“宽度不生效”
-        const gap = Math.max(0.02, Math.min(0.82, Number((1 - Number(slider.value)).toFixed(2))));
-        STATE.barGap = gap;
-      } else {
-        STATE.markerOpacity = Number(slider.value);
+/* helper to convert 3-role selections into backend request vars */
+function collectAnalysisVars() {
+  var result = {};
+  var allSelected = [];
+  domAll('#roleControls .role-select').forEach(function(sel) {
+    var role = sel.dataset.role;
+    var vals = Array.from(sel.selectedOptions).map(function(o) { return o.value; }).filter(Boolean);
+    if (role === 'research_vars') {
+      allSelected = vals.concat(allSelected);
+      result.group_var = vals[0] || null;
+      result.x_var = vals[0] || null;
+      result.time_var = vals.find(function(v) { return /time|survival|duration|天|月|时间|生存/i.test(v); }) || null;
+      result.subject_var = vals.find(function(v) { return /id|subject|patient|受试|编号/i.test(v); }) || null;
+      if (['logistic_regression', 'linear_regression', 'discriminant_analysis', 'quadratic_discriminant_analysis'].indexOf(STATE.activeChartType) >= 0) {
+        result.x_vars = vals.slice();
+        result.predictor_vars = vals.slice();
+        result.group_var = null;
+        result.x_var = null;
       }
-    };
-    slider.addEventListener('input', () => {
-      applySliderState();
-      refreshCurrentVisualization();
+    } else if (role === 'outcome_vars') {
+      allSelected = vals.concat(allSelected);
+      result.var = vals[0] || '';
+      result.y_var = vals[0] || '';
+      result.paired_var = vals[1] || null;
+      result.event_var = vals.find(function(v) { return /event|death|status|outcome|结局|事件|死亡/i.test(v); }) || null;
+    } else if (role === 'covar_vars') {
+      allSelected = vals.concat(allSelected);
+      result.covar = vals[0] || null;
+      result.subject_var = result.subject_var || vals.find(function(v) { return /id|subject|patient|受试|编号/i.test(v); }) || null;
+      if (['logistic_regression', 'linear_regression', 'discriminant_analysis', 'quadratic_discriminant_analysis'].indexOf(STATE.activeChartType) >= 0) {
+        var currentPredictors = result.x_vars || [];
+        result.x_vars = currentPredictors.concat(vals.filter(function(v) { return v !== result.subject_var; }));
+        result.predictor_vars = result.x_vars.slice();
+      } else {
+        result.x_vars = vals.filter(function(v) { return v !== result.subject_var; });
+      }
+    }
+  });
+  if (result.x_vars) {
+    result.x_vars = Array.from(new Set(result.x_vars.filter(Boolean)));
+    result.predictor_vars = result.x_vars.slice();
+  }
+  return result;
+}
+
+function renderParamControls() {
+  var container = dom('paramControls');
+  var countLabel = dom('paramCountLabel');
+  if (!container) return;
+
+  var config = STATE.activeChartType ? getTestConfig(STATE.activeChartType) : null;
+  if (!config || !STATE.activeChartType) {
+    container.innerHTML = '<div class="empty-state small">选择方法后显示该方法可调参数。</div>';
+    if (countLabel) countLabel.textContent = '0 项参数';
+    return;
+  }
+
+  var paramDefs = getResolvedTestParams(STATE.activeChartType);
+
+  if (!STATE.methodParams) STATE.methodParams = {};
+  paramDefs.forEach(function(p) {
+    if (!(p.key in STATE.methodParams)) STATE.methodParams[p.key] = p.default;
+  });
+
+  if (countLabel) countLabel.textContent = paramDefs.length + ' 项参数';
+
+  if (paramDefs.length === 0) {
+    container.innerHTML = '<div class="empty-state small">该方法没有可调节的参数。</div>';
+    return;
+  }
+
+  container.innerHTML = paramDefs.map(function(p) {
+    var currentVal = STATE.methodParams[p.key] != null ? STATE.methodParams[p.key] : p.default;
+    var inputHtml = '';
+    if (p.type === 'select') {
+      inputHtml = '<select class="param-input" data-param-key="' + p.key + '" style="width:100%;min-height:32px;border:1px solid var(--line);border-radius:5px;padding:4px 6px;font-size:13px">' +
+        (p.options || []).map(function(opt) {
+          var sel = String(opt) === String(currentVal) ? ' selected' : '';
+          return '<option value="' + escapeHtml(String(opt)) + '"' + sel + '>' + escapeHtml(String(opt)) + '</option>';
+        }).join('') + '</select>';
+    } else {
+      var minAttr = p.min != null ? ' min="' + escapeHtml(String(p.min)) + '"' : '';
+      var maxAttr = p.max != null ? ' max="' + escapeHtml(String(p.max)) + '"' : '';
+      var stepAttr = p.step != null ? ' step="' + escapeHtml(String(p.step)) + '"' : ' step="any"';
+      inputHtml = '<input type="number" class="param-input" data-param-key="' + p.key + '" value="' + escapeHtml(String(currentVal)) + '"' + minAttr + maxAttr + stepAttr + ' style="width:100%;min-height:32px;border:1px solid var(--line);border-radius:5px;padding:4px 6px;font-size:13px" />';
+    }
+    var noteHtml = p.note ? '<small>' + escapeHtml(p.note) + '</small>' : '';
+    var labelEn = p.label_en ? '<em>' + escapeHtml(p.label_en) + '</em>' : '';
+    return '<div class="param-label"><strong>' + escapeHtml(p.label || p.key) + '</strong>' + labelEn + inputHtml + noteHtml + '</div>';
+  }).join('');
+
+  domAll('.param-input', container).forEach(function(input) {
+    input.addEventListener('change', function() {
+      STATE.methodParams[input.dataset.paramKey] = input.type === 'number' && input.value !== '' ? Number(input.value) : input.value;
     });
-    slider.addEventListener('change', () => {
-      applySliderState();
-      refreshCurrentVisualization();
+    input.addEventListener('input', function() {
+      STATE.methodParams[input.dataset.paramKey] = input.type === 'number' && input.value !== '' ? Number(input.value) : input.value;
     });
   });
 }
 
-// ===== Run Analysis =====
-async function runAnalysis() {
-  const config = getTestConfig(STATE.activeChartType);
-  if (!config) { toast('请先选择统计方法', 'warning'); return; }
-  if (!STATE.columns || STATE.columns.length === 0) { toast('请先载入数据', 'warning'); return; }
+function getResolvedTestParams(testId) {
+  if (!testId) return [];
+  if (STATE.methodParamsCatalog && Array.isArray(STATE.methodParamsCatalog[testId])) {
+    return STATE.methodParamsCatalog[testId];
+  }
+  if (typeof getTestParams === 'function') return getTestParams(testId);
+  return [];
+}
 
-  const btn = el('generateChartBtn');
+async function loadBackendParamCatalog() {
+  try {
+    var payload = await apiGet('/api/test-params');
+    STATE.methodParamsCatalog = payload.test_params || {};
+    if (STATE.activeChartType) {
+      renderParamControls();
+    }
+  } catch (e) {
+    console.warn('参数目录加载失败，使用前端内置参数。', e);
+  }
+}
+
+/* ── Analysis Execution ─────────────────────────────────── */
+async function runAnalysis() {
+  if (!STATE.activeChartType) { showToast('请先选择统计方法', 'warning'); return; }
+  if (!STATE.columns || STATE.columns.length === 0) { showToast('请先加载数据', 'warning'); return; }
+
+  var btn = dom('generateBtn');
+  var origText = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.textContent = '分析中...'; }
 
   try {
-    const body = buildAnalysisRequest(config);
-    const data = await apiPost('/api/analyze', body);
+    var vars = collectAnalysisVars();
 
-    if (data.status === 'error') { toast(data.message || '分析失败', 'error'); return; }
-
-    STATE.currentStatResult = data.result;
-    STATE.currentResult = data.result;
-    STATE.currentStatChartData = data.result?.chart_data || null;
-    STATE.currentDiscussion = data.discussion || null;
-    STATE.currentTableData = data.tables?.result || null;
-    STATE.currentStatTables = data.tables || null;
-
-    renderStatResults(data);
-    renderDataDescriptionPanel();
-    updateDownloadList();
-    updateChartSettingsVisibility(true);
-    activateStep('result');
-    toast('统计分析完成！已生成数据描述、统计描述与结果可视化', 'success');
-  } catch (e) {
-    toast('分析失败: ' + e.message, 'error');
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '开始分析'; }
-  }
-}
-
-function buildAnalysisRequest(config) {
-  const params = collectSelectedVars();
-  const defaults = (typeof getTestDefaultParams === 'function') ? getTestDefaultParams(STATE.activeChartType) : {};
-  const hasCol = v => !!v && (!STATE.columns || STATE.columns.includes(v));
-  const outcomes = asArrayValue(params.outcome_vars);
-  const research = asArrayValue(params.research_vars);
-  const covars = asArrayValue(params.covar_vars);
-  const defaultOutcome = [defaults.y_var, defaults.var, defaults.outcome_var].find(hasCol) || '';
-  const defaultGroup = [defaults.x_var, defaults.group_var].find(hasCol) || '';
-  const defaultPaired = [defaults.paired_var, defaults.var2, defaults.event_var].find(hasCol) || '';
-  const defaultPredictors = [
-    ...(Array.isArray(defaults.value_vars) ? defaults.value_vars : []),
-    ...(Array.isArray(defaults.x_vars) ? defaults.x_vars : []),
-    ...(Array.isArray(defaults.predictor_vars) ? defaults.predictor_vars : []),
-  ].filter(hasCol);
-
-  const responseVar = params.var || outcomes[0] || defaultOutcome || '';
-  const predictors = [...new Set([...(params.value_vars || []), ...research, ...covars, ...defaultPredictors].filter(Boolean))]
-    .filter(v => v !== responseVar);
-
-  const body = {
-    test_type: STATE.activeChartType,
-    var: responseVar,
-    use_demo: !STATE.uploadId,
-    dataset_name: STATE.datasetName || 'comprehensive_example',
-    upload_id: STATE.uploadId || null,
-    sheet_name: STATE.activeSheet || null,
-    research_vars: research,
-    covar_vars: covars,
-    outcome_vars: outcomes,
-  };
-
-  if (config.requiresGroup) body.group_var = params.group_var || research[0] || defaultGroup || '';
-  if (config.requiresPaired) body.paired_var = params.paired_var || outcomes[1] || defaultPaired || research[0] || '';
-  if (config.supportsPostHoc) body.post_hoc = STATE.postHocMethod || null;
-  if (config.requiresSubject) body.subject_var = params.subject_var || '';
-  if (config.requiresTimeEvent) {
-    const allSelected = [...new Set([...outcomes, ...research, ...covars].filter(Boolean))];
-    const timeCandidate = [params.time_var, ...outcomes, ...research].find(v => v && hasNumericSignal(v, 2) && /time|survival|duration|follow|天|月|时间|生存/i.test(String(v))) ||
-      [params.time_var, ...outcomes, ...research].find(v => v && hasNumericSignal(v, 2)) || '';
-    const eventCandidate = [params.event_var, ...allSelected].find(v => v && v !== timeCandidate && binaryEventInfo(v).valid) || '';
-    body.time_var = timeCandidate;
-    body.event_var = eventCandidate;
-  }
-  if (config.requiresCovariate) {
-    body.covar = [params.covar, ...covars, defaults.covar].find(v => v && hasNumericSignal(v, 3)) || params.covar || covars[0] || defaults.covar || '';
-  }
-  if (config.requiresMultiVar) {
-    body.value_vars = predictors;
-    body.x_vars = predictors;
-    body.predictor_vars = predictors;
-  }
-
-  return body;
-}
-
-// ===== Export Buttons =====
-function setupExportButtons() {
-  document.addEventListener('click', function(e) {
-    const exportBtn = e.target.closest('#analysisExportBar .export-btn');
-    if (exportBtn) {
-      e.preventDefault();
-      const fmt = exportBtn.dataset.fmt;
-      if (fmt === 'excel') exportTableExcel();
-      else if (fmt === 'csv') exportTableCSV();
-      else if (fmt === 'html') exportTableHTML();
-      else if (fmt === 'clipboard') copyTableToClipboard();
-      return;
-    }
-    const resultExportBtn = e.target.closest('#resultUnifiedExportBar .result-export-btn');
-    if (resultExportBtn) {
-      e.preventDefault();
-      const fmt = resultExportBtn.dataset.resultExport;
-      if (typeof exportUnifiedResult === 'function') exportUnifiedResult(fmt);
-      return;
-    }
-
-    const downloadToggle = e.target.closest('#chartDownloadBtn');
-    if (downloadToggle) { e.preventDefault(); toggleChartDownloadMenu(); return; }
-    const chartExportBtn = e.target.closest('#chartDownloadMenu .download-option');
-    if (chartExportBtn) {
-      e.preventDefault();
-      const fmt = chartExportBtn.dataset.fmt;
-      closeChartDownloadMenu();
-      if (['png', 'svg', 'tiff', 'pdf'].includes(fmt)) downloadChartImage(fmt);
-      return;
-    }
-    if (!e.target.closest('#chartExportBar')) closeChartDownloadMenu();
-  });
-
-  // Run button
-  const runBtn = el('generateChartBtn');
-  if (runBtn) runBtn.addEventListener('click', () => runAnalysis());
-}
-
-function toggleChartDownloadMenu() {
-  const menu = el('chartDownloadMenu'), btn = el('chartDownloadBtn');
-  if (!menu || !btn) return;
-  const wo = !menu.hidden;
-  menu.hidden = wo;
-  btn.setAttribute('aria-expanded', wo ? 'false' : 'true');
-}
-function closeChartDownloadMenu() {
-  const menu = el('chartDownloadMenu'), btn = el('chartDownloadBtn');
-  if (menu && btn) { menu.hidden = true; btn.setAttribute('aria-expanded', 'false'); }
-}
-
-// ===== Chart Rendering (delegates to renderChart in charts.js) =====
-function renderChart(plotlyData, plotlyLayout) {
-  const container = el('chartPreviewContainer');
-  if (!container || !window.Plotly) return;
-
-  const sourceTraces = (STATE.currentPlotlyDataRaw && STATE.currentPlotlyDataRaw.length) ? STATE.currentPlotlyDataRaw : plotlyData;
-  const sourceLayout = (STATE.currentPlotlyLayoutRaw && Object.keys(STATE.currentPlotlyLayoutRaw || {}).length) ? STATE.currentPlotlyLayoutRaw : plotlyLayout;
-  if (!sourceTraces || !sourceTraces.length) return;
-
-  const theme = typeof getActiveTheme === 'function' ? getActiveTheme() : (CHART_THEMES ? CHART_THEMES[STATE.chartTheme || 'cnsTheme'] : {});
-  let traces = JSON.parse(JSON.stringify(sourceTraces || []));
-  let layout = JSON.parse(JSON.stringify(sourceLayout || {}));
-
-  if (theme) {
-    layout.paper_bgcolor = theme.bgColor || layout.paper_bgcolor || '#ffffff';
-    layout.plot_bgcolor = theme.plotBgColor || layout.plot_bgcolor || '#ffffff';
-    if (theme.ink && layout.font) layout.font = { ...layout.font, color: theme.ink };
-    if (theme.fontFamily && layout.font) layout.font = { ...layout.font, family: theme.fontFamily };
-  }
-
-  if (typeof polishTracesForPublication === 'function') traces = polishTracesForPublication(traces, theme);
-  if (typeof applyThemeLayout === 'function') layout = applyThemeLayout(layout, theme);
-  if (typeof polishLayoutForPublication === 'function') layout = polishLayoutForPublication(layout, STATE.currentChartKind, theme);
-
-  const bg = STATE.chartPlotBg || '#ffffff';
-  layout.paper_bgcolor = bg;
-  layout.plot_bgcolor = bg;
-  const gridMode = STATE.chartGridMode || 'grid';
-  const customGridColor = STATE.chartGridColor || '#e5edf7';
-  const isPolarChart = Boolean(layout.polar)
-    || String(STATE.currentChartKind || '').toLowerCase().includes('polar')
-    || traces.some(t => ['barpolar', 'scatterpolar'].includes(String(t.type || '')));
-  if (isPolarChart && layout.polar) {
-    layout.polar = {
-      ...(layout.polar || {}),
-      bgcolor: bg,
-      radialaxis: {
-        ...(layout.polar.radialaxis || {}),
-        showgrid: gridMode === 'grid',
-        gridcolor: gridMode === 'grid' ? customGridColor : 'rgba(0,0,0,0)',
-      },
-      angularaxis: {
-        ...(layout.polar.angularaxis || {}),
-        showgrid: gridMode === 'grid',
-        gridcolor: gridMode === 'grid' ? customGridColor : 'rgba(0,0,0,0)',
-      },
+    var body = {
+      test_type: STATE.activeChartType,
+      var: vars.var || vars.y_var || '',
+      group_var: vars.group_var || vars.x_var || null,
+      paired_var: vars.paired_var || null,
+      time_var: vars.time_var || null,
+      event_var: vars.event_var || null,
+      subject_var: vars.subject_var || null,
+      covar: vars.covar || null,
+      x_vars: vars.x_vars || null,
+      predictor_vars: vars.predictor_vars || null,
+      post_hoc: STATE.postHocMethod || null,
+      params: STATE.methodParams || {},
+      use_demo: !STATE.uploadId,
+      dataset_name: STATE.datasetName || 'comprehensive_example',
+      upload_id: STATE.uploadId || null,
     };
-  } else {
-    ['xaxis', 'yaxis'].forEach(axisKey => {
-      layout[axisKey] = layout[axisKey] || {};
-    });
-    Object.keys(layout).filter(k => /^xaxis\d*$|^yaxis\d*$/.test(k)).forEach(k => {
-      layout[k] = {
-        ...(layout[k] || {}),
-        showgrid: gridMode === 'grid',
-        gridcolor: customGridColor,
-        zeroline: gridMode === 'grid',
-        zerolinecolor: customGridColor,
-      };
-    });
+
+    var data = await apiPost('/api/analyze', body);
+
+    if (data.status === 'error') { showToast(data.message || '分析失败', 'error'); if (btn) { btn.disabled = false; btn.textContent = origText; } return; }
+
+    STATE.currentResult = data.result;
+    STATE.currentStatResult = data.result;
+    STATE.currentStatChartData = data.result ? data.result.chart_data : null;
+    STATE.currentDiscussion = data.discussion || null;
+    STATE.currentTables = data.tables || null;
+    STATE.currentTableData = data.tables ? data.tables.result : null;
+    STATE.userTraceColorsByChart = {};
+    STATE.userColors = null;
+
+    APP.lastResult = data;
+    activateStep('result');
+    renderResults(data);
+    showToast('分析完成！', 'success');
+  } catch (e) {
+    showToast('分析失败: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = origText || '开始分析'; }
   }
+}
+
+/* ── Result Rendering ───────────────────────────────────── */
+function renderResults(data) {
+  var summary = dom('resultSummary');
+  if (summary && data.result) {
+    summary.innerHTML = '<p style="font-size:15px;font-weight:800;color:#142238">' + escapeHtml(data.result.test_name || '') + ' — ' + escapeHtml(data.result.summary || '') + '</p>';
+  }
+
+  renderResultTables(data);
+  renderDiscussion(data);
+
+  if (data.result && data.result.chart_data) {
+    renderStatChart(data.result, data.result);
+  } else {
+    var chartPlot = dom('chartActivePlot');
+    if (chartPlot) chartPlot.innerHTML = '<div class="empty-state small">该分析结果无可视化图形。</div>';
+  }
+}
+
+function renderStatChart(resultOrChartData, fullResult) {
+  var container = dom('chartActivePlot');
+  if (!container) return;
+  if (!window.Plotly) {
+    container.innerHTML = '<div class="empty-state small">Plotly 库未加载。</div>';
+    return;
+  }
+
+  var result = resultOrChartData && resultOrChartData.test_type
+    ? resultOrChartData
+    : (STATE.currentStatResult || { test_type: STATE.activeChartType, test_name: '统计图形', chart_data: resultOrChartData || {} });
+  var chartData = result.chart_data || resultOrChartData || {};
+  if (!chartData || !chartData.chart_type) {
+    container.innerHTML = '<div class="empty-state small">该分析结果无可视化图形。</div>';
+    return;
+  }
+
+  var rawData = {};
+  try {
+    rawData = typeof buildDataFromState === 'function' ? buildDataFromState() : {};
+  } catch (e) {
+    rawData = {};
+  }
+  var params = collectAnalysisVars();
+  var titleInput = dom('chartTitleInput');
+  var titleText = (titleInput && titleInput.value ? titleInput.value.trim() : '') || chartData.title || result.test_name || '统计图形';
+  var backendPlot = typeof buildStatPlotFromChartData === 'function' ? buildStatPlotFromChartData(chartData, titleText) : null;
+
+  var traces = backendPlot ? (backendPlot.traces || []) : [];
+  var layout = backendPlot ? (backendPlot.layout || { title: { text: titleText } }) : { title: { text: titleText } };
+  var chartType = backendPlot ? (backendPlot.chartType || result.test_type) : result.test_type;
+
+  if (!traces.length && chartData.coefs_bar) {
+    var cb = chartData.coefs_bar;
+    traces = [{
+      type: 'bar',
+      orientation: 'h',
+      y: cb.names || [],
+      x: cb.values || [],
+      name: result.test_type === 'logistic_regression' ? 'OR / β' : 'β',
+      meta: { colorIndex: 0 },
+    }];
+    layout = { title: { text: cb.title || titleText }, xaxis: { title: { text: '标准化系数' } }, yaxis: { title: { text: '变量' }, automargin: true } };
+    chartType = 'bar';
+  }
+
+  var variants = [];
+  if (typeof buildStatChartVariants === 'function') {
+    variants = buildStatChartVariants(cloneForChart(traces), cloneForChart(layout), chartType, result, rawData, params);
+  }
+  if (!variants.length && traces.length) {
+    variants = [{ label: '主图', title: titleText, chartType: chartType, traces: cloneForChart(traces), layout: cloneForChart(layout) }];
+  }
+  if (!variants.length) {
+    container.innerHTML = '<div class="empty-state small">当前结果没有可绘制的数据。</div>';
+    return;
+  }
+
+  APP.chartVariants = variants;
+  APP.activeChartVariant = 0;
+  STATE.statChartVariants = variants;
+  STATE.activeStatChartVariantIndex = 0;
+  renderChartVariantTabs();
+  renderActiveStatVariant();
+}
+
+function cloneForChart(value) {
+  try { return JSON.parse(JSON.stringify(value || null)); }
+  catch (e) { return value; }
+}
+
+function renderChartVariantTabs() {
+  var tabsContainer = dom('chartVariantTabs');
+  var variants = APP.chartVariants || [];
+  if (!tabsContainer) return;
+  if (variants.length <= 1) {
+    tabsContainer.innerHTML = '';
+    return;
+  }
+  tabsContainer.innerHTML = variants.map(function(v, i) {
+    var label = v.label || v.title || ('图形 ' + (i + 1));
+    return '<button class="chart-variant-tab' + (i === (APP.activeChartVariant || 0) ? ' active' : '') + '" data-variant-idx="' + i + '" type="button">' + escapeHtml(label) + '</button>';
+  }).join('');
+  domAll('.chart-variant-tab', tabsContainer).forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      APP.activeChartVariant = parseInt(tab.dataset.variantIdx, 10) || 0;
+      STATE.activeStatChartVariantIndex = APP.activeChartVariant;
+      domAll('.chart-variant-tab', tabsContainer).forEach(function(t) { t.classList.remove('active'); });
+      tab.classList.add('active');
+      renderActiveStatVariant();
+    });
+  });
+}
+
+function renderActiveStatVariant() {
+  var container = dom('chartActivePlot');
+  var variants = APP.chartVariants || [];
+  var variant = variants[APP.activeChartVariant || 0];
+  if (!container || !variant || !window.Plotly) return;
+
+  var oldPlot = container.querySelector('.js-plotly-plot');
+  if (oldPlot) Plotly.purge(oldPlot);
+  container.innerHTML = '';
+
+  var rawTraces = cloneForChart(variant.traces || []);
+  var rawLayout = cloneForChart(variant.layout || {});
+  var chartType = variant.chartType || STATE.currentChartKind || 'scatter';
+  var theme = typeof getActiveTheme === 'function' ? getActiveTheme() : (CHART_THEMES ? CHART_THEMES[STATE.chartTheme || 'cnsTheme'] : {});
+  var traceColors = getSavedAppearanceColors();
+  STATE.userColors = traceColors.length ? traceColors : null;
+  STATE.currentChartKind = chartType;
+  STATE.currentPlotlyDataRaw = cloneForChart(rawTraces);
+  STATE.currentPlotlyLayoutRaw = cloneForChart(rawLayout);
+
+  var traces = cloneForChart(rawTraces);
+  var layout = cloneForChart(rawLayout);
+  if (typeof polishTracesForPublication === 'function') traces = polishTracesForPublication(traces, theme);
+  traces = applyDirectAppearanceToTraces(traces);
+  if (typeof applyThemeLayout === 'function') layout = applyThemeLayout(layout, theme);
+  layout = applyDirectAppearanceToLayout(layout, chartType, theme);
+
+  var size = getResultChartSize(container, chartType);
+  layout.width = size.width;
+  layout.height = size.height;
+  layout.autosize = false;
+
+  var plotDiv = document.createElement('div');
+  plotDiv.className = 'chart-plot';
+  plotDiv.style.width = size.width + 'px';
+  plotDiv.style.height = size.height + 'px';
+  container.appendChild(plotDiv);
 
   STATE.currentPlotlyData = traces;
   STATE.currentPlotlyLayout = layout;
-  STATE.currentAppearanceContext = typeof getCurrentAppearanceContext === 'function' ? getCurrentAppearanceContext(STATE.currentChartKind) : null;
-  if (typeof renderChartVariantBar === 'function') renderChartVariantBar();
 
-  const oldPlot = container.querySelector('.js-plotly-plot');
-  if (oldPlot && window.Plotly) Plotly.purge(oldPlot);
-  container.innerHTML = '';
-  const plotMount = document.createElement('div');
-  plotMount.className = 'chart-plot';
-  container.appendChild(plotMount);
-
-  const availableW = Math.max(640, container.clientWidth - 28);
-  const availableH = Math.max(520, container.clientHeight - 28);
-  const w = Math.min(availableW, 980);
-  const h = Math.min(availableH, Math.max(520, Math.round(w * 0.68)));
-  plotMount.style.width = `${w}px`;
-  plotMount.style.height = `${h}px`;
-  layout.width = w; layout.height = h;
-  layout.autosize = false;
-
-  Plotly.newPlot(plotMount, traces, layout, {
-    responsive: true, displaylogo: false, displayModeBar: false,
-  });
-
-  const chartExportBar = el('chartExportBar');
-  if (chartExportBar) chartExportBar.hidden = false;
-}
-
-
-function updateWorkflowButtons() {
-  const hasData = STATE.columns && STATE.columns.length > 0;
-  const selectedVars = collectSelectedVars();
-  const hasOutcome = asArrayValue(selectedVars.outcome_vars).length > 0;
-  const activeConfig = typeof getTestConfig === 'function' ? getTestConfig(STATE.activeChartType) : null;
-  const activeAvail = activeConfig ? checkMethodAvailability(activeConfig, selectedVars) : { available: false };
-
-  const variableNextBtn = el('variableNextBtn');
-  const methodNextBtn = el('methodNextBtn');
-  const previewNextBtn = el('previewNextBtn');
-  const runBtn = el('generateChartBtn');
-  if (previewNextBtn) previewNextBtn.disabled = !hasData;
-  if (variableNextBtn) variableNextBtn.disabled = !(hasData && hasOutcome);
-  if (methodNextBtn) methodNextBtn.disabled = !(hasData && STATE.activeChartType && activeAvail.available);
-  if (runBtn) runBtn.disabled = !(hasData && STATE.activeChartType && activeAvail.available);
-}
-
-function renderDataDescriptionPanel() {
-  const target = el('dataDescriptionContainer');
-  if (!target) return;
-  const hasData = STATE.columns && STATE.columns.length > 0;
-  if (!hasData) {
-    target.innerHTML = '<div class="empty-state">尚未载入数据</div>';
-    return;
-  }
-
-  const cols = STATE.columns || [];
-  const summary = STATE.summary || {};
-  const missing = summary.missing_percent ?? STATE.missing_percent ?? '—';
-
-  const selectedVars = collectSelectedVars();
-  const research = asArrayValue(selectedVars.research_vars);
-  const covars = asArrayValue(selectedVars.covar_vars);
-  const outcomes = asArrayValue(selectedVars.outcome_vars);
-  const activeName = getTestConfig(STATE.activeChartType)?.name || '尚未选择';
-
-  const typeRows = Object.entries(STATE.variableTypes || {})
-    .filter(([, arr]) => Array.isArray(arr) && arr.length)
-    .map(([k, arr]) => `<tr><td>${escapeHtml(k)}</td><td>${arr.length}</td><td>${escapeHtml(arr.slice(0, 10).join('、'))}${arr.length > 10 ? ' …' : ''}</td></tr>`)
-    .join('');
-
-  target.innerHTML = `
-    <div class="description-table-block compact-description-block">
-      <h4>数据集基本信息</h4>
-      <table class="three-line desc-table"><tbody>
-        <tr><th>数据来源</th><td>${escapeHtml(STATE.fileName || STATE.datasetName || '当前数据集')}</td><th>样本量</th><td>${STATE.rowCount || 0}</td></tr>
-        <tr><th>变量数</th><td>${STATE.colCount || cols.length || 0}</td><th>总体缺失比例</th><td>${escapeHtml(missing)}</td></tr>
-        <tr><th>当前统计方案</th><td>${escapeHtml(activeName)}</td><th>当前数据视图</th><td>基本信息、变量角色与变量类型</td></tr>
-      </tbody></table>
-    </div>
-
-    <div class="description-table-block compact-description-block">
-      <h4>变量角色选择概览</h4>
-      <table class="three-line desc-table"><tbody>
-        <tr><th>研究变量</th><td>${escapeHtml(research.join('、') || '未选择')}</td></tr>
-        <tr><th>协变量 / 混杂因素</th><td>${escapeHtml(covars.join('、') || '未选择')}</td></tr>
-        <tr><th>结局变量</th><td>${escapeHtml(outcomes.join('、') || '未选择')}</td></tr>
-      </tbody></table>
-    </div>
-
-    <div class="description-table-block compact-description-block">
-      <h4>变量类型概览</h4>
-      <table class="three-line desc-table"><thead><tr><th>变量类型</th><th>数量</th><th>代表变量</th></tr></thead><tbody>
-        ${typeRows || '<tr><td colspan="3">暂无变量类型信息</td></tr>'}
-      </tbody></table>
-    </div>
-  `;
-}
-
-function updateChartSettingsVisibility(forceShow = false) {
-  const panel = el('chartSettingsPanel');
-  if (!panel) return;
-  const hasChart = !!(STATE.currentPlotlyData && STATE.currentPlotlyData.length > 0) || !!(STATE.currentPlotlyDataRaw && STATE.currentPlotlyDataRaw.length > 0) || !!STATE.currentStatChartData;
-  panel.classList.toggle('is-hidden', !(forceShow || hasChart));
-  const variantBar = el('chartVariantBar');
-  if (variantBar) variantBar.hidden = !(forceShow || hasChart);
-  if (forceShow || hasChart) {
+  Plotly.newPlot(plotDiv, traces, layout, {
+    responsive: false,
+    displaylogo: false,
+    displayModeBar: false,
+    staticPlot: false,
+  }).then(function() {
     renderAppearanceControls();
-    if (typeof renderChartVariantBar === 'function') renderChartVariantBar();
+  }).catch(function(e) {
+    container.innerHTML = '<div class="empty-state small">渲染出错: ' + escapeHtml(e.message) + '</div>';
+  });
+}
+
+function getSavedAppearanceColors() {
+  var idx = APP.activeChartVariant || 0;
+  var byChart = STATE.userTraceColorsByChart || {};
+  var colors = byChart[idx] || [];
+  return Array.isArray(colors) ? colors.filter(Boolean) : [];
+}
+
+function isColorString(value) {
+  return typeof value === 'string' && (value.indexOf('#') === 0 || value.indexOf('rgb') === 0 || /^[a-z]+$/i.test(value));
+}
+
+function toColorInputValue(value, fallback) {
+  var color = String(value || '').trim();
+  if (/^#[0-9a-f]{6}$/i.test(color)) return color;
+  if (/^#[0-9a-f]{3}$/i.test(color)) {
+    return '#' + color.slice(1).split('').map(function(ch) { return ch + ch; }).join('');
   }
+  var rgb = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+  if (rgb) {
+    return '#' + [rgb[1], rgb[2], rgb[3]].map(function(n) {
+      var h = Math.max(0, Math.min(255, Number(n))).toString(16);
+      return h.length === 1 ? '0' + h : h;
+    }).join('');
+  }
+  return fallback || '#2E6F9E';
 }
 
-// ===== Boot =====
-function bootEmptyState() {
-  updateMetricGrid();
-  updatePreviewTable();
-  updateDatasetMeta();
-  updateDownloadList();
-  updateDataMeta();
-  updateWorkflowButtons();
-  setWorkflowHint('请先在左侧加载示例或上传文件');
-  updateChartSettingsVisibility();
-  activateStep('upload');
-  activateWsTab('preview');
+function colorFromScale(colorscale, fallbackIndex) {
+  if (!Array.isArray(colorscale) || !colorscale.length) return null;
+  var idx = fallbackIndex === 0 ? 0 : colorscale.length - 1;
+  var item = colorscale[idx];
+  if (Array.isArray(item)) return item[1] || null;
+  return item || null;
 }
 
+function getFallbackPaletteColor(index) {
+  var theme = typeof getActiveTheme === 'function' ? getActiveTheme() : {};
+  var pal = typeof getActivePalette === 'function' ? getActivePalette() : null;
+  var base = pal || theme.colorway || ['#2E6F9E', '#D95F59', '#2A9D8F', '#E9A93A', '#6F5AA7'];
+  return base[index % base.length];
+}
 
-let workflowHintTimer = null;
-function setWorkflowHint(message, type = 'success') {
-  const hint = el('workflowHint');
-  if (!hint) return;
-  clearTimeout(workflowHintTimer);
-  if (!message) {
-    hint.textContent = '';
-    hint.className = 'workflow-hint is-hidden';
+function getAppearanceControlColors(context, rawTraces) {
+  var saved = getSavedAppearanceColors();
+  var targets = (context && context.targets) || [];
+  if (saved.length) {
+    return targets.map(function(_, idx) { return saved[idx] || getFallbackPaletteColor(idx); });
+  }
+  return targets.map(function(target, idx) {
+    var trace = rawTraces[target.traceIndex] || {};
+    if (target.mode === 'scale') {
+      return colorFromScale(trace.colorscale || (trace.marker && trace.marker.colorscale), target.pointIndex) || getFallbackPaletteColor(idx);
+    }
+    if (target.mode === 'point') {
+      var markerColor = trace.marker && trace.marker.color;
+      if (Array.isArray(markerColor) && isColorString(markerColor[target.pointIndex])) return markerColor[target.pointIndex];
+      if (isColorString(markerColor)) return markerColor;
+      return getFallbackPaletteColor(idx);
+    }
+    var c = trace.marker && trace.marker.color;
+    if (Array.isArray(c)) c = c.find(isColorString);
+    return (isColorString(c) && c) || (trace.line && isColorString(trace.line.color) && trace.line.color) || getFallbackPaletteColor(idx);
+  });
+}
+
+function applyDirectAppearanceToTraces(traces) {
+  return (traces || []).map(function(trace) {
+    var t = Object.assign({}, trace || {});
+    var type = String(t.type || '').toLowerCase();
+    if (type === 'scatter' || type === 'scatterpolar' || type === 'scattergeo') {
+      var mode = String(t.mode || '');
+      if (!t.marker) t.marker = {};
+      if (!t.line) t.line = {};
+      if (mode.indexOf('markers') >= 0 || !mode || type !== 'scatter') {
+        if (STATE.markerSize != null) t.marker.size = Number(STATE.markerSize);
+        if (STATE.markerOpacity != null) t.marker.opacity = Number(STATE.markerOpacity);
+        if (STATE.markerShape) t.marker.symbol = STATE.markerShape;
+      }
+      if (mode.indexOf('lines') >= 0 || type === 'scatterpolar') {
+        if (STATE.lineWidth != null) t.line.width = Number(STATE.lineWidth);
+        if (STATE.lineDash) t.line.dash = STATE.lineDash;
+      }
+    }
+    if (type === 'bar' || type === 'barpolar') {
+      if (STATE.markerOpacity != null) t.marker = Object.assign({}, t.marker || {}, { opacity: Number(STATE.markerOpacity) });
+      if (STATE.barWidth != null && type === 'bar') t.width = Number(STATE.barWidth);
+    }
+    if (type === 'histogram' && STATE.histogramBins != null) {
+      t.nbinsx = Number(STATE.histogramBins);
+    }
+    if (type === 'box') {
+      t.boxpoints = STATE.boxPoints || false;
+      if (STATE.markerSize != null) t.marker = Object.assign({}, t.marker || {}, { size: Number(STATE.markerSize) });
+    }
+    if (type === 'violin') {
+      t.points = STATE.violinPoints || false;
+      if (STATE.markerSize != null) t.marker = Object.assign({}, t.marker || {}, { size: Number(STATE.markerSize) });
+    }
+    if ((type === 'pie' || type === 'sunburst') && STATE.pieHole != null) {
+      t.hole = Number(STATE.pieHole);
+    }
+    if (type === 'sankey') {
+      if (STATE.sankeyNodePad != null) t.node = Object.assign({}, t.node || {}, { pad: Number(STATE.sankeyNodePad) });
+      if (STATE.sankeyNodeThickness != null) t.node = Object.assign({}, t.node || {}, { thickness: Number(STATE.sankeyNodeThickness) });
+    }
+    if ((type === 'heatmap' || type === 'contour') && STATE.heatmapColorscale) {
+      t.colorscale = STATE.heatmapColorscale;
+    }
+    return t;
+  });
+}
+
+function applyDirectAppearanceToLayout(layout, chartType, theme) {
+  var l = Object.assign({}, layout || {});
+  if (typeof polishLayoutForPublication === 'function') {
+    l = polishLayoutForPublication(l, chartType, theme || {});
+  }
+  if (STATE.chartTitle) {
+    var title = typeof l.title === 'string' ? { text: l.title } : Object.assign({}, l.title || {});
+    title.text = STATE.chartTitle;
+    l.title = title;
+  }
+  if (STATE.chartTitleFontSize) {
+    var titleObj = typeof l.title === 'string' ? { text: l.title } : Object.assign({}, l.title || {});
+    titleObj.font = Object.assign({}, titleObj.font || {}, { size: Number(STATE.chartTitleFontSize) });
+    l.title = titleObj;
+  }
+  if (STATE.barGap != null) l.bargap = Number(STATE.barGap);
+  if (STATE.chartGridMode === 'none') {
+    Object.keys(l).forEach(function(key) {
+      if (/^xaxis\d*$|^yaxis\d*$/.test(key)) l[key] = Object.assign({}, l[key] || {}, { showgrid: false });
+    });
+  }
+  if (STATE.chartGridColor) {
+    Object.keys(l).forEach(function(key) {
+      if (/^xaxis\d*$|^yaxis\d*$/.test(key)) l[key] = Object.assign({}, l[key] || {}, { gridcolor: STATE.chartGridColor });
+    });
+  }
+  return l;
+}
+
+function getResultChartSize(container, chartType) {
+  var customW = Number(STATE.chartWidth);
+  var customH = Number(STATE.chartHeight);
+  if (customW > 0 && customH > 0) {
+    return { width: Math.round(customW), height: Math.round(customH) };
+  }
+  return { width: 760, height: 600 };
+}
+
+function renderAppearanceControls() {
+  var panel = dom('appearanceControls');
+  if (!panel) return;
+  var rawTraces = STATE.currentPlotlyDataRaw || [];
+  if (!rawTraces.length) {
+    panel.innerHTML = '<div class="empty-state small">生成图形后可调节点、线、柱、颜色和尺寸。</div>';
     return;
   }
-  hint.textContent = message;
-  hint.className = 'workflow-hint ' + (type || 'info');
-  workflowHintTimer = setTimeout(() => {
-    hint.textContent = '';
-    hint.className = 'workflow-hint is-hidden';
-  }, 3000);
+  var context = typeof getCurrentAppearanceContext === 'function'
+    ? getCurrentAppearanceContext(STATE.currentChartKind)
+    : { chartKind: 'generic', styleOptions: [], targets: [] };
+  STATE.currentAppearanceContext = context;
+  var colors = getAppearanceControlColors(context, rawTraces);
+  var hasMarkers = rawTraces.some(function(t) { return ['scatter', 'scatterpolar', 'scattergeo', 'box', 'violin'].indexOf(String(t.type || '').toLowerCase()) >= 0; });
+  var hasLines = rawTraces.some(function(t) { return String(t.mode || '').indexOf('lines') >= 0 || String(t.type || '').toLowerCase() === 'scatterpolar'; });
+  var hasBars = rawTraces.some(function(t) { return ['bar', 'barpolar'].indexOf(String(t.type || '').toLowerCase()) >= 0; });
+  var hasHist = rawTraces.some(function(t) { return String(t.type || '').toLowerCase() === 'histogram'; });
+  var hasBox = rawTraces.some(function(t) { return String(t.type || '').toLowerCase() === 'box'; });
+  var hasViolin = rawTraces.some(function(t) { return String(t.type || '').toLowerCase() === 'violin'; });
+  var hasPie = rawTraces.some(function(t) { return ['pie', 'sunburst'].indexOf(String(t.type || '').toLowerCase()) >= 0; });
+  var hasHeatmap = rawTraces.some(function(t) { return ['heatmap', 'contour'].indexOf(String(t.type || '').toLowerCase()) >= 0; });
+  var hasSankey = rawTraces.some(function(t) { return String(t.type || '').toLowerCase() === 'sankey'; });
+  var size = {
+    width: Number(STATE.chartWidth) || 760,
+    height: Number(STATE.chartHeight) || 600,
+  };
+  var html = '';
+  html += '<div class="size-grid">' +
+    '<label class="field field-tight"><span>图片宽度</span><input id="chartWidthInput" type="number" min="360" max="2400" step="10" value="' + escapeHtml(String(Math.round(size.width))) + '"></label>' +
+    '<label class="field field-tight"><span>图片高度</span><input id="chartHeightInput" type="number" min="280" max="1800" step="10" value="' + escapeHtml(String(Math.round(size.height))) + '"></label>' +
+    '<label class="check-field wide"><input id="chartSizeLink" type="checkbox"' + (APP.sizeLinked ? ' checked' : '') + '><span>联动宽高比例</span></label>' +
+    '</div>';
+  if (context.styleOptions && context.styleOptions.length) {
+    html += '<label class="field field-tight"><span>视觉样式</span><select data-chart-state="chartVisualStyle">' +
+      context.styleOptions.map(function(opt) {
+        return '<option value="' + escapeHtml(opt.id) + '"' + (String(STATE.chartVisualStyle || 'solid') === String(opt.id) ? ' selected' : '') + '>' + escapeHtml(opt.label) + '</option>';
+      }).join('') + '</select></label>';
+  }
+  html += '<div class="color-controls-section"><span class="color-controls-label">颜色联动</span><div class="color-buttons-grid">' +
+    ((context.targets || []).length ? context.targets.map(function(target, idx) {
+      return '<label class="color-row">' +
+        '<span class="color-trace-name">' + escapeHtml(target.label || ('系列 ' + (idx + 1))) + '</span>' +
+        '<input class="color-picker-input" type="color" data-color-index="' + idx + '" value="' + escapeHtml(toColorInputValue(colors[idx], getFallbackPaletteColor(idx))) + '">' +
+      '</label>';
+    }).join('') : '<div class="empty-state small">当前图形没有可单独调色的系列。</div>') +
+    '</div><button type="button" class="text-btn appearance-reset-colors" id="resetTraceColorsBtn">恢复调色盘</button>' +
+    '</div>';
+  html += '<div class="compact-grid">' +
+    '<label class="field field-tight"><span>标题字号</span><input type="number" min="10" max="40" step="1" data-chart-state="chartTitleFontSize" value="' + escapeHtml(String(STATE.chartTitleFontSize || 18)) + '"></label>' +
+    '<label class="field field-tight"><span>网格线</span><select data-chart-state="chartGridMode"><option value="grid"' + ((STATE.chartGridMode || 'grid') === 'grid' ? ' selected' : '') + '>显示</option><option value="none"' + (STATE.chartGridMode === 'none' ? ' selected' : '') + '>隐藏</option></select></label>' +
+    '</div>';
+  if (hasMarkers || hasLines || hasBars || hasHist || hasBox || hasViolin || hasPie || hasHeatmap || hasSankey) {
+    html += '<div class="compact-grid">';
+    if (hasMarkers) {
+      html += '<label class="field field-tight"><span>点大小</span><input type="number" min="3" max="28" step="1" data-chart-state="markerSize" value="' + escapeHtml(String(STATE.markerSize || 8)) + '"></label>' +
+        '<label class="field field-tight"><span>点透明度</span><input type="number" min="0.2" max="1" step="0.05" data-chart-state="markerOpacity" value="' + escapeHtml(String(STATE.markerOpacity != null ? STATE.markerOpacity : 0.88)) + '"></label>' +
+        '<label class="field field-tight"><span>点形状</span><select data-chart-state="markerShape"><option value="circle">圆点</option><option value="square">方形</option><option value="diamond">菱形</option><option value="triangle-up">三角</option><option value="circle-open">空心圆</option></select></label>';
+    }
+    if (hasLines) {
+      html += '<label class="field field-tight"><span>线宽</span><input type="number" min="1" max="8" step="0.2" data-chart-state="lineWidth" value="' + escapeHtml(String(STATE.lineWidth || 2.5)) + '"></label>' +
+        '<label class="field field-tight"><span>线型</span><select data-chart-state="lineDash"><option value="solid">实线</option><option value="dash">虚线</option><option value="dot">点线</option><option value="dashdot">点划线</option></select></label>';
+    }
+    if (hasBars) {
+      html += '<label class="field field-tight"><span>柱宽</span><input type="number" min="0.15" max="0.9" step="0.05" data-chart-state="barWidth" value="' + escapeHtml(String(STATE.barWidth || 0.42)) + '"></label>' +
+        '<label class="field field-tight"><span>柱间距</span><input type="number" min="0" max="0.7" step="0.05" data-chart-state="barGap" value="' + escapeHtml(String(STATE.barGap != null ? STATE.barGap : 0.24)) + '"></label>';
+    }
+    if (hasHist) html += '<label class="field field-tight"><span>直方图分箱</span><input type="number" min="5" max="80" step="1" data-chart-state="histogramBins" value="' + escapeHtml(String(STATE.histogramBins || 24)) + '"></label>';
+    if (hasBox) html += '<label class="field field-tight"><span>箱线散点</span><select data-chart-state="boxPoints"><option value="">隐藏</option><option value="outliers">异常值</option><option value="all">全部点</option></select></label>';
+    if (hasViolin) html += '<label class="field field-tight"><span>小提琴散点</span><select data-chart-state="violinPoints"><option value="">隐藏</option><option value="outliers">异常值</option><option value="all">全部点</option></select></label>';
+    if (hasPie) html += '<label class="field field-tight"><span>环形孔径</span><input type="number" min="0" max="0.75" step="0.05" data-chart-state="pieHole" value="' + escapeHtml(String(STATE.pieHole || 0)) + '"></label>';
+    if (hasHeatmap) html += '<label class="field field-tight"><span>热图色阶</span><select data-chart-state="heatmapColorscale"><option value="">跟随主题</option><option value="Viridis">Viridis</option><option value="Blues">Blues</option><option value="RdBu">RdBu</option><option value="YlGnBu">YlGnBu</option></select></label>';
+    if (hasSankey) html += '<label class="field field-tight"><span>节点间距</span><input type="number" min="4" max="40" step="1" data-chart-state="sankeyNodePad" value="' + escapeHtml(String(STATE.sankeyNodePad || 15)) + '"></label>' +
+      '<label class="field field-tight"><span>节点厚度</span><input type="number" min="6" max="40" step="1" data-chart-state="sankeyNodeThickness" value="' + escapeHtml(String(STATE.sankeyNodeThickness || 18)) + '"></label>';
+    html += '</div>';
+  }
+  panel.innerHTML = html;
+  syncSelectValue(panel, 'markerShape', STATE.markerShape || 'circle');
+  syncSelectValue(panel, 'lineDash', STATE.lineDash || 'solid');
+  syncSelectValue(panel, 'boxPoints', STATE.boxPoints || '');
+  syncSelectValue(panel, 'violinPoints', STATE.violinPoints || '');
+  syncSelectValue(panel, 'heatmapColorscale', STATE.heatmapColorscale || '');
+  bindSizeControls(panel);
+  bindAppearanceControls(panel);
 }
 
-// ===== Utilities =====
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;').replaceAll("'", '&#039;');
+function syncSelectValue(parent, stateKey, value) {
+  var input = parent.querySelector('[data-chart-state="' + stateKey + '"]');
+  if (input) input.value = value;
 }
+
+function bindAppearanceControls(panel) {
+  domAll('[data-chart-state]', panel).forEach(function(input) {
+    input.addEventListener('change', updateChartStateFromInput);
+    input.addEventListener('input', updateChartStateFromInput);
+  });
+  domAll('[data-color-index]', panel).forEach(function(input) {
+    input.addEventListener('input', updateTraceColorFromInput);
+    input.addEventListener('change', updateTraceColorFromInput);
+  });
+  var reset = dom('resetTraceColorsBtn');
+  if (reset) {
+    reset.addEventListener('click', function() {
+      if (!STATE.userTraceColorsByChart) STATE.userTraceColorsByChart = {};
+      STATE.userTraceColorsByChart[APP.activeChartVariant || 0] = [];
+      STATE.userColors = null;
+      renderActiveStatVariant();
+    });
+  }
+}
+
+function bindSizeControls(panel) {
+  var widthInput = dom('chartWidthInput');
+  var heightInput = dom('chartHeightInput');
+  var link = dom('chartSizeLink');
+  if (!widthInput || !heightInput || !link) return;
+  var applySize = function(source) {
+    var width = Number(widthInput.value || STATE.chartWidth || 760);
+    var height = Number(heightInput.value || STATE.chartHeight || 600);
+    if (APP.sizeLinked) {
+      if (source === 'width') {
+        height = Math.round(width / Math.max(0.1, APP.chartAspect || (760 / 600)));
+        heightInput.value = String(height);
+      } else if (source === 'height') {
+        width = Math.round(height * Math.max(0.1, APP.chartAspect || (760 / 600)));
+        widthInput.value = String(width);
+      }
+    }
+    STATE.chartWidth = width;
+    STATE.chartHeight = height;
+    renderActiveStatVariant();
+  };
+  link.addEventListener('change', function() {
+    APP.sizeLinked = link.checked;
+    APP.chartAspect = Number(widthInput.value || 760) / Math.max(1, Number(heightInput.value || 600));
+  });
+  widthInput.addEventListener('input', function() { applySize('width'); });
+  heightInput.addEventListener('input', function() { applySize('height'); });
+}
+
+function updateChartStateFromInput(event) {
+  var input = event.currentTarget;
+  var key = input.dataset.chartState;
+  if (!key) return;
+  var value = input.value;
+  if (input.type === 'number') value = value === '' ? null : Number(value);
+  STATE[key] = value;
+  renderActiveStatVariant();
+}
+
+function updateTraceColorFromInput(event) {
+  var input = event.currentTarget;
+  var idx = Number(input.dataset.colorIndex);
+  if (!Number.isFinite(idx)) return;
+  if (!STATE.userTraceColorsByChart) STATE.userTraceColorsByChart = {};
+  var variantIdx = APP.activeChartVariant || 0;
+  var colors = (STATE.userTraceColorsByChart[variantIdx] || []).slice();
+  colors[idx] = input.value;
+  STATE.userTraceColorsByChart[variantIdx] = colors;
+  renderActiveStatVariant();
+}
+
+function renderResultTables(data) {
+  var container = dom('resultTablesContainer');
+  if (!container) return;
+  var html = '';
+  if (data.tables && data.tables.result) {
+    var tbl = data.tables.result;
+    html += '<div class="result-table-wrap"><div class="result-table-title">统计结果</div>' + buildMedicalTable(tbl) + '</div>';
+  }
+  if (data.tables && data.tables.group_stats) {
+    var tbl2 = data.tables.group_stats;
+    html += '<div class="result-table-wrap"><div class="result-table-title">分组统计</div>' + buildMedicalTable(tbl2) + '</div>';
+  }
+  if (data.tables && data.tables.post_hoc) {
+    var tbl3 = data.tables.post_hoc;
+    html += '<div class="result-table-wrap"><div class="result-table-title">事后检验</div>' + buildMedicalTable(tbl3) + '</div>';
+  }
+  container.innerHTML = html || '<div class="empty-state small">无表格数据。</div>';
+}
+
+function buildMedicalTable(tbl) {
+  if (!tbl || !tbl.columns || !tbl.rows) return '<p>无数据</p>';
+  var cols = Array.isArray(tbl.columns) ? tbl.columns : [tbl.columns || 'Value'];
+  var h = '<table class="medical-table"><thead><tr>';
+  cols.forEach(function(c) { h += '<th>' + escapeHtml(String(c)) + '</th>'; });
+  h += '</tr></thead><tbody>';
+  var rows = Array.isArray(tbl.rows) ? tbl.rows : [];
+  rows.forEach(function(row) {
+    h += '<tr>';
+    if (Array.isArray(row)) {
+      for (var i = 0; i < cols.length; i++) h += '<td>' + escapeHtml(String(row[i] != null ? row[i] : '')) + '</td>';
+    } else if (typeof row === 'object') {
+      cols.forEach(function(c) { h += '<td>' + escapeHtml(String(row[c] != null ? row[c] : '')) + '</td>'; });
+    } else {
+      h += '<td colspan="' + cols.length + '">' + escapeHtml(String(row)) + '</td>';
+    }
+    h += '</tr>';
+  });
+  h += '</tbody></table>';
+  return h;
+}
+
+function renderDiscussion(data) {
+  var container = dom('discussionContainer');
+  if (!container) return;
+  if (!data.discussion) { container.innerHTML = '<div class="empty-state small">无结果解读。</div>'; return; }
+
+  var discussion = data.discussion || {};
+  var sections = discussion.sections || [];
+  var result = data.result || {};
+  var summaryText = result.summary || discussion.headline || '分析已完成。';
+  var flowItems = sections.slice(0, 4).map(function(sec, idx) {
+    var first = (sec.items && sec.items[0]) || sec.text || '';
+    return '<div class="discussion-flow-item">' +
+      '<span>' + (idx + 1) + '</span>' +
+      '<strong>' + escapeHtml(sec.title || '解读要点') + '</strong>' +
+      '<p>' + escapeHtml(String(first)) + '</p>' +
+    '</div>';
+  }).join('');
+  var detailHtml = sections.map(function(sec) {
+    var items = (sec.items || []).map(function(item) {
+      return '<li>' + escapeHtml(String(item)) + '</li>';
+    }).join('');
+    return '<section class="discussion-detail-card">' +
+      '<h3>' + escapeHtml(sec.title || '解读') + '</h3>' +
+      (sec.text ? '<p>' + escapeHtml(String(sec.text)) + '</p>' : '') +
+      (items ? '<ul>' + items + '</ul>' : '') +
+    '</section>';
+  }).join('');
+
+  var html = '<div class="discussion-page">' +
+    '<section class="discussion-summary">' +
+      '<div><span>结果解读</span><h2>' + escapeHtml(discussion.headline || '分析结果解读') + '</h2></div>' +
+      '<p>' + escapeHtml(summaryText) + '</p>' +
+    '</section>' +
+    '<section class="discussion-flow">' + (flowItems || '<div class="empty-state small">暂无结构化解读。</div>') + '</section>' +
+    '<section class="discussion-detail-grid">' + detailHtml + '</section>' +
+  '</div>';
+  container.innerHTML = html;
+}
+
+/* ── Result Tabs ────────────────────────────────────────── */
+function setupResultTabs() {
+  domAll('.result-top-tab').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      APP.activeResultTab = tab.dataset.resultTab;
+      domAll('.result-top-tab').forEach(function(t) { t.classList.remove('active'); });
+      tab.classList.add('active');
+      domAll('.result-view').forEach(function(v) { v.classList.remove('active'); });
+      var view = dom('result-view-' + tab.dataset.resultTab);
+      if (view) view.classList.add('active');
+      if (tab.dataset.resultTab === 'chart' && STATE.currentStatResult) {
+        setTimeout(function() { renderStatChart(STATE.currentStatResult, STATE.currentStatResult); }, 80);
+      }
+    });
+  });
+}
+
+/* ── Category Tabs ──────────────────────────────────────── */
+function setupCategoryTabs() {
+  domAll('#methodCatTabs .cat-tab').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      domAll('#methodCatTabs .cat-tab').forEach(function(t) { t.classList.remove('active'); });
+      tab.classList.add('active');
+      STATE.activeChartCategory = tab.dataset.cat;
+      renderMethodGrid(tab.dataset.cat);
+    });
+  });
+}
+
+/* ── Init ───────────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', function() {
+  setupStepNavigation();
+  setupResultTabs();
+  setupCategoryTabs();
+  loadBackendParamCatalog();
+  renderMethodGrid('parametric');
+  renderParamControls();
+  enableNextIfReady();
+
+  dom('methodNextBtn').addEventListener('click', function() { activateStep('data'); });
+  dom('dataNextBtn').addEventListener('click', function() {
+    renderVariableControls();
+    renderParamControls();
+    activateStep('variables');
+    autoRecommendCurrentRoles({ quiet: true, render: true });
+  });
+  dom('generateBtn').addEventListener('click', runAnalysis);
+
+  if (typeof setupUploadHandlers === 'function') setupUploadHandlers();
+
+  // Chart theme
+  var themeSel = dom('chartThemeSelect');
+  if (themeSel) {
+    themeSel.addEventListener('change', function() {
+      STATE.chartTheme = themeSel.value;
+      rerenderCurrentChart();
+    });
+  }
+  // Chart palette
+  var paletteSel = dom('chartPaletteSelect');
+  if (paletteSel) {
+    paletteSel.addEventListener('change', function() {
+      STATE.chartPalette = paletteSel.value;
+      rerenderCurrentChart();
+    });
+  }
+  // Chart title input
+  var titleInput = dom('chartTitleInput');
+  if (titleInput) {
+    titleInput.addEventListener('input', function() {
+      STATE.chartTitle = titleInput.value;
+      rerenderCurrentChart();
+    });
+  }
+
+  // Auto-recommend button
+  var autoBtn = dom('autoRoleBtn');
+  if (autoBtn) {
+    autoBtn.addEventListener('click', function() {
+      autoRecommendCurrentRoles({ quiet: false, render: true });
+    });
+  }
+
+  // Export buttons
+  domAll('.export-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var fmt = btn.dataset.fmt;
+      if (fmt === 'csv' && APP.lastResult) {
+        downloadCSV(APP.lastResult);
+        return;
+      }
+      exportChartImage(fmt);
+    });
+  });
+});
+
+function rerenderCurrentChart() {
+  if (APP.chartVariants && APP.chartVariants.length) {
+    renderActiveStatVariant();
+  } else if (STATE.currentStatResult) {
+    renderStatChart(STATE.currentStatResult, STATE.currentStatResult);
+  }
+}
+
+async function autoRecommendCurrentRoles(options) {
+  options = options || {};
+  var autoBtn = dom('autoRoleBtn');
+  if (!STATE.activeChartType) {
+    if (!options.quiet) showToast('请先选择统计方法', 'warning');
+    return null;
+  }
+  if (!STATE.columns || STATE.columns.length === 0) {
+    if (!options.quiet) showToast('请先加载数据', 'warning');
+    return null;
+  }
+  if (autoBtn && !options.quiet) { autoBtn.disabled = true; autoBtn.textContent = '推荐中...'; }
+  try {
+    var payload = {
+      method_id: STATE.activeChartType,
+      dataset_name: STATE.datasetName || null,
+      upload_id: STATE.uploadId || null,
+      sheet_name: STATE.activeSheet || null,
+      use_demo: !STATE.uploadId,
+    };
+    var data = await apiPost('/api/recommend-roles', payload);
+    if (data.available && data.roles) {
+      if (!STATE.methodRoleRecommendations) STATE.methodRoleRecommendations = {};
+      STATE.methodRoleRecommendations[STATE.activeChartType] = data.roles;
+      if (data.params && typeof data.params === 'object') {
+        STATE.methodParams = Object.assign({}, STATE.methodParams || {}, data.params);
+      }
+      if (options.render) {
+        applyRecommendedRoles(data.roles, data.params);
+      }
+      if (!options.quiet) showToast('已自动推荐变量和参数', 'success');
+    } else {
+      if (!options.quiet) showToast(data.reason || '无法自动推荐', 'warning');
+      var msg = dom('roleValidationMessage');
+      if (msg && options.render) {
+        msg.textContent = data.reason || '没有找到满足当前统计方法的变量组合。';
+        msg.className = 'validation-message error';
+      }
+    }
+    return data;
+  } catch(e) {
+    if (!options.quiet) showToast('自动推荐失败: ' + e.message, 'error');
+    return { available: false, reason: e.message };
+  } finally {
+    if (autoBtn) { autoBtn.disabled = false; autoBtn.textContent = '自动推荐'; }
+  }
+}
+
+function applyRecommendedRoles(roles, params) {
+  var container = dom('roleControls');
+  if (!STATE.methodRoleRecommendations) STATE.methodRoleRecommendations = {};
+  if (STATE.activeChartType) STATE.methodRoleRecommendations[STATE.activeChartType] = roles || {};
+  if (!container || !container.querySelector('.role-select')) {
+    renderVariableControls();
+    container = dom('roleControls');
+  }
+  var applied = setRoleSelections(roles || {}, container);
+  // Also apply recommended params
+  if (params && typeof params === 'object') {
+    Object.keys(params).forEach(function(k) { STATE.methodParams[k] = params[k]; });
+    renderParamControls();
+  }
+  var msg = dom('roleValidationMessage');
+  if (msg) {
+    msg.textContent = applied
+      ? '已自动填充推荐变量和参数。可直接点击"开始分析"，也可手动微调。'
+      : '已收到推荐结果，但当前数据列中没有可匹配的变量，请检查数据表头。';
+    msg.className = applied ? 'validation-message ok' : 'validation-message error';
+  }
+}
+
+function downloadCSV(data) {
+  if (!data || !data.tables || !data.tables.result) { showToast('无数据可导出', 'warning'); return; }
+  var tbl = data.tables.result;
+  var cols = tbl.columns || [];
+  var rows = tbl.rows || [];
+  var csv = cols.join(',') + '\n';
+  rows.forEach(function(row) {
+    if (Array.isArray(row)) csv += row.join(',') + '\n';
+    else csv += cols.map(function(c) { return '"' + String(row[c] != null ? row[c] : '') + '"'; }).join(',') + '\n';
+  });
+  var blob = new Blob(['﻿' + csv], {type: 'text/csv;charset=utf-8'});
+  var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'analysis_result.csv'; a.click();
+}
+
+function exportChartImage(fmt) {
+  if (!APP.activeChartVariant && APP.chartVariants && APP.chartVariants.length) APP.activeChartVariant = 0;
+  var v = APP.chartVariants && APP.chartVariants[APP.activeChartVariant || 0];
+  if (!v) { showToast('没有可导出的图表', 'warning'); return; }
+  var container = dom('chartActivePlot');
+  if (!container || !container.querySelector('.js-plotly-plot') || !window.Plotly) { showToast('图表未渲染', 'warning'); return; }
+  var plot = container.querySelector('.js-plotly-plot');
+  var width = Number(STATE.chartWidth) || (STATE.currentPlotlyLayout && STATE.currentPlotlyLayout.width) || 960;
+  var height = Number(STATE.chartHeight) || (STATE.currentPlotlyLayout && STATE.currentPlotlyLayout.height) || 540;
+  if (fmt === 'svg') {
+    Plotly.downloadImage(plot, {format: 'svg', width: width, height: height, filename: 'chart'});
+  } else if (fmt === 'pdf') {
+    exportChartAsPdf(plot, width, height);
+  } else {
+    Plotly.downloadImage(plot, {format: 'png', width: width, height: height, filename: 'chart'});
+  }
+}
+
+async function exportChartAsPdf(plot, cssWidth, cssHeight) {
+  try {
+    // Plotly.js doesn't support PDF → rasterize to canvas, encode as PDF
+    var dataUrl = await Plotly.toImage(plot, {
+      format: 'png',
+      width: cssWidth,
+      height: cssHeight,
+      scale: 2,
+    });
+    var img = await loadImageFromDataUrl(dataUrl);
+    var canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth || img.width;
+    canvas.height = img.naturalHeight || img.height;
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0);
+
+    if (typeof encodeCanvasAsPdf === 'function') {
+      var pdfBytes = encodeCanvasAsPdf(canvas, cssWidth, cssHeight);
+      var blob = new Blob([pdfBytes], { type: 'application/pdf' });
+      downloadBlob(blob, 'chart.pdf');
+      showToast('PDF 已下载', 'success');
+    } else {
+      // Fallback: open print dialog for user to "Save as PDF"
+      var w = window.open('', '_blank');
+      if (!w) { showToast('请允许弹出窗口以导出PDF', 'warning'); return; }
+      w.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Chart</title>' +
+        '<style>body{margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#fff}' +
+        'img{max-width:100%}</style></head><body>' +
+        '<img src="' + dataUrl + '" onload="window.print()"></body></html>');
+      w.document.close();
+    }
+  } catch (e) {
+    showToast('PDF 导出失败: ' + e.message, 'error');
+  }
+}
+
+// Expose
+window.activateStep = activateStep;
+window.renderMethodGrid = renderMethodGrid;
+window.selectMethod = selectMethod;
+window.renderVariableControls = renderVariableControls;
+window.renderParamControls = renderParamControls;
+window.runAnalysis = runAnalysis;
+window.autoRecommendCurrentRoles = autoRecommendCurrentRoles;
+window.renderAppearanceControls = renderAppearanceControls;
+window.renderActiveStatVariant = renderActiveStatVariant;

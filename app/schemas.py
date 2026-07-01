@@ -43,6 +43,8 @@ class AnalyzeRequest(BaseModel):
     # Table params
     decimal_places: int = 2
     p_digits: int = 3
+    # Method parameters (for parameter tuning)
+    params: dict | None = Field(default_factory=dict)
 
 
 class ChartRequest(BaseModel):

@@ -9,6 +9,31 @@ from scipy.stats import pearsonr, spearmanr, chi2_contingency
 _MISSING_TEXT_VALUES = {"", "NA", "N/A", "nan", "NaN", "None", "none", "null", "NULL"}
 
 
+def _pp(method_params: dict | None, key: str, default=None):
+    """Extract a parameter value from method_params dict with fallback to default."""
+    if not method_params:
+        return default
+    val = method_params.get(key)
+    if val is None or val == "":
+        return default
+    return val
+
+
+def _pp_alpha(method_params: dict | None) -> float:
+    """Extract alpha significance level from method_params."""
+    raw = _pp(method_params, "alpha", "0.05")
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        return 0.05
+
+
+def _pp_alt(method_params: dict | None) -> str:
+    """Extract alternative hypothesis from method_params."""
+    raw = _pp(method_params, "alternative", "two-sided")
+    return str(raw) if raw in ("two-sided", "less", "greater") else "two-sided"
+
+
 def format_p_value(p: float | None, digits: int = 4) -> str:
     if p is None:
         return "—"
@@ -30,6 +55,41 @@ def _test_normality(series: pd.Series, alpha: float = 0.05) -> bool:
         return p > alpha
     except Exception:
         return False
+
+
+def _build_model_chart_data(df: pd.DataFrame, y_var: str, predictors: list[str], coefs: dict, model_type: str) -> dict:
+    """Build chart data for regression models (logistic/linear)."""
+    try:
+        import numpy as np
+        chart_data = {"chart_type": "model_coefficients", "predictors": predictors, "coefs": coefs, "y_var": str(y_var), "model_type": model_type}
+
+        # Add actual-vs-predicted or coefficient bar chart data
+        numeric_preds = [p for p in predictors if p in df.columns and pd.api.types.is_numeric_dtype(df[p])]
+        if len(numeric_preds) >= 2:
+            # Pick first 2 numeric predictors for a scatter with outcome
+            x_var = numeric_preds[0]
+            y_vals = pd.to_numeric(df[y_var], errors="coerce").dropna()
+            x_vals = pd.to_numeric(df[x_var], errors="coerce")
+            mask = x_vals.notna() & pd.to_numeric(df[y_var], errors="coerce").notna()
+            if mask.sum() >= 5:
+                chart_data["scatter"] = {
+                    "x_var": x_var,
+                    "y_var": y_var,
+                    "x_values": x_vals[mask].tolist(),
+                    "y_values": pd.to_numeric(df[y_var], errors="coerce")[mask].tolist(),
+                }
+
+        # Build coefficient bar chart
+        if coefs:
+            chart_data["coefs_bar"] = {
+                "names": list(coefs.keys()),
+                "values": list(coefs.values()),
+                "title": f"{'Logistic' if model_type == 'logistic' else 'Linear'} 回归标准化系数"
+            }
+
+        return chart_data
+    except Exception:
+        return None
 
 
 def _clean_text_series(series: pd.Series) -> pd.Series:
@@ -228,7 +288,7 @@ def calc_group_comparison(df: pd.DataFrame, var: str, group_col: str) -> dict:
 
 # ═══ Individual Statistical Test Functions ═══════════════════════
 
-def t_test_independent(df: pd.DataFrame, var: str, group_var: str) -> dict:
+def t_test_independent(df: pd.DataFrame, var: str, group_var: str, method_params: dict | None = None) -> dict:
     groups = sorted(df[group_var].dropna().unique().tolist())
     if len(groups) != 2:
         return {"error": f"独立样本t检验需要恰好2组，当前有{len(groups)}组"}
@@ -236,7 +296,11 @@ def t_test_independent(df: pd.DataFrame, var: str, group_var: str) -> dict:
     b = _numeric_series(df.loc[df[group_var] == groups[1], var]).dropna().to_numpy(dtype=float)
     if len(a) < 2 or len(b) < 2:
         return {"error": "独立样本t检验每组至少需要2个有效数值观测"}
-    t_stat, p_val = stats.ttest_ind(a, b, equal_var=False)
+    alpha = _pp_alpha(method_params)
+    alternative = _pp_alt(method_params)
+    equal_var_str = _pp(method_params, "equal_var", "False")
+    equal_var = str(equal_var_str).lower() == "true"
+    t_stat, p_val = stats.ttest_ind(a, b, equal_var=equal_var, alternative=alternative)
     is_normal_a = _test_normality(pd.Series(a))
     is_normal_b = _test_normality(pd.Series(b))
     note = ""
@@ -258,10 +322,10 @@ def t_test_independent(df: pd.DataFrame, var: str, group_var: str) -> dict:
         "test_name": "独立样本t检验 (Welch's t-test)",
         "statistic": round(float(t_stat), 4),
         "p_value": round(float(p_val), 6),
-        "significant": p_val < 0.05,
-        "method": "Welch's t-test（不假设方差齐性）",
+        "significant": p_val < alpha,
+        "method": "Student's t-test（假设方差齐性）" if equal_var else "Welch's t-test（不假设方差齐性）",
         "note": note if note else None,
-        "summary": f"t = {t_stat:.4f}, p = {format_p_value(p_val)}",
+        "summary": f"t = {t_stat:.4f}, p = {format_p_value(p_val)}, α = {alpha}",
         "details": {
             "group_1": {"name": str(groups[0]), "n": int(len(a)), "mean": round(float(np.mean(a)), 3), "std": round(float(np.std(a, ddof=1)), 3), "normal": is_normal_a},
             "group_2": {"name": str(groups[1]), "n": int(len(b)), "mean": round(float(np.mean(b)), 3), "std": round(float(np.std(b, ddof=1)), 3), "normal": is_normal_b},
@@ -275,7 +339,7 @@ def t_test_independent(df: pd.DataFrame, var: str, group_var: str) -> dict:
     }
 
 
-def t_test_paired(df: pd.DataFrame, var: str, paired_var: str) -> dict:
+def t_test_paired(df: pd.DataFrame, var: str, paired_var: str, method_params: dict | None = None) -> dict:
     df_clean = pd.DataFrame({
         var: _numeric_series(df[var]),
         paired_var: _numeric_series(df[paired_var]),
@@ -284,16 +348,18 @@ def t_test_paired(df: pd.DataFrame, var: str, paired_var: str) -> dict:
     b = df_clean[paired_var].values
     if len(a) < 3:
         return {"error": "配对样本量不足（需要至少3对完整数据）"}
-    t_stat, p_val = stats.ttest_rel(a, b)
+    alpha = _pp_alpha(method_params)
+    alternative = _pp_alt(method_params)
+    t_stat, p_val = stats.ttest_rel(a, b, alternative=alternative)
     diffs = a - b
     return {
         "test_type": "t_test_paired",
         "test_name": "配对样本t检验 (Paired t-test)",
         "statistic": round(float(t_stat), 4),
         "p_value": round(float(p_val), 6),
-        "significant": p_val < 0.05,
+        "significant": p_val < alpha,
         "method": "配对t检验",
-        "summary": f"t = {t_stat:.4f}, p = {format_p_value(p_val)}",
+        "summary": f"t = {t_stat:.4f}, p = {format_p_value(p_val)}, α = {alpha}",
         "details": {
             "n_pairs": int(len(a)),
             "mean_before": round(float(np.mean(a)), 3),
@@ -316,13 +382,23 @@ def t_test_paired(df: pd.DataFrame, var: str, paired_var: str) -> dict:
     }
 
 
-def one_sample_t_test(df: pd.DataFrame, var: str, hypothesized_mean: float = 0.0) -> dict:
+def one_sample_t_test(df: pd.DataFrame, var: str, hypothesized_mean: float = 0.0, method_params: dict | None = None) -> dict:
     """One-sample t-test against a specified reference mean."""
     series = pd.to_numeric(df[var], errors="coerce").dropna()
     if len(series) < 3:
         return {"error": "单样本 t 检验样本量不足（需要至少 3 个有效观测）"}
     values = series.to_numpy(dtype=float)
-    t_stat, p_val = stats.ttest_1samp(values, popmean=hypothesized_mean)
+    # Override hypothesized_mean from params if provided
+    if method_params:
+        hm = _pp(method_params, "hypothesized_mean")
+        if hm is not None:
+            try:
+                hypothesized_mean = float(hm)
+            except (ValueError, TypeError):
+                pass
+    alpha = _pp_alpha(method_params)
+    alternative = _pp_alt(method_params)
+    t_stat, p_val = stats.ttest_1samp(values, popmean=hypothesized_mean, alternative=alternative)
     mean_val = float(np.mean(values))
     sd_val = float(np.std(values, ddof=1))
     se = sd_val / np.sqrt(len(values))
@@ -336,9 +412,9 @@ def one_sample_t_test(df: pd.DataFrame, var: str, hypothesized_mean: float = 0.0
         "test_name": "单样本 t 检验 (One-sample t-test)",
         "statistic": round(float(t_stat), 4),
         "p_value": round(float(p_val), 6),
-        "significant": p_val < 0.05,
+        "significant": p_val < alpha,
         "method": f"One-sample t-test, reference mean = {hypothesized_mean:g}",
-        "summary": f"t = {t_stat:.4f}, p = {format_p_value(p_val)}, n = {len(values)}",
+        "summary": f"t = {t_stat:.4f}, p = {format_p_value(p_val)}, n = {len(values)}, α = {alpha}",
         "note": None if normal else "正态性未完全满足；样本量较小时建议结合符号检验或非参数方法作敏感性分析。",
         "details": {
             "n": int(len(values)),
@@ -358,7 +434,7 @@ def one_sample_t_test(df: pd.DataFrame, var: str, hypothesized_mean: float = 0.0
     }
 
 
-def normality_test(df: pd.DataFrame, var: str) -> dict:
+def normality_test(df: pd.DataFrame, var: str, method_params: dict | None = None) -> dict:
     """Shapiro-Wilk normality test with distribution diagnostics."""
     series = pd.to_numeric(df[var], errors="coerce").dropna()
     if len(series) < 3:
@@ -366,18 +442,19 @@ def normality_test(df: pd.DataFrame, var: str) -> dict:
     tested = series
     if len(tested) > 5000:
         tested = tested.sample(n=5000, random_state=42)
+    alpha = _pp_alpha(method_params)
     w_stat, p_val = stats.shapiro(tested.to_numpy(dtype=float))
-    is_normal = p_val >= 0.05
+    is_normal = p_val >= alpha
     values = series.to_numpy(dtype=float)
     return {
         "test_type": "normality_test",
         "test_name": "Shapiro-Wilk 正态性检验",
         "statistic": round(float(w_stat), 4),
         "p_value": round(float(p_val), 6),
-        "significant": p_val < 0.05,
+        "significant": p_val < alpha,
         "method": "Shapiro-Wilk normality test",
-        "summary": f"W = {w_stat:.4f}, p = {format_p_value(p_val)}",
-        "note": "P < 0.05 提示分布显著偏离正态。" if not is_normal else "未发现显著偏离正态的证据。",
+        "summary": f"W = {w_stat:.4f}, p = {format_p_value(p_val)}, α = {alpha}",
+        "note": "P < α 提示分布显著偏离正态。" if not is_normal else "未发现显著偏离正态的证据。",
         "details": {
             "n": int(len(series)),
             "tested_n": int(len(tested)),
@@ -396,7 +473,7 @@ def normality_test(df: pd.DataFrame, var: str) -> dict:
     }
 
 
-def levene_variance_test(df: pd.DataFrame, var: str, group_var: str) -> dict:
+def levene_variance_test(df: pd.DataFrame, var: str, group_var: str, method_params: dict | None = None) -> dict:
     """Median-centered Levene/Brown-Forsythe test for homogeneity of variance."""
     groups = sorted(df[group_var].dropna().unique().tolist())
     if len(groups) < 2:
@@ -408,16 +485,18 @@ def levene_variance_test(df: pd.DataFrame, var: str, group_var: str) -> dict:
             group_data[str(group)] = vals
     if len(group_data) < 2:
         return {"error": "有效分组不足；每组至少需要 2 个有效观测"}
-    stat, p_val = stats.levene(*group_data.values(), center="median")
-    equal_var = p_val >= 0.05
+    alpha = _pp_alpha(method_params)
+    center = _pp(method_params, "center", "median")
+    stat, p_val = stats.levene(*group_data.values(), center=center)
+    equal_var = p_val >= alpha
     return {
         "test_type": "levene_test",
         "test_name": "Levene 方差齐性检验",
         "statistic": round(float(stat), 4),
         "p_value": round(float(p_val), 6),
-        "significant": p_val < 0.05,
-        "method": "Median-centered Levene test (Brown-Forsythe)",
-        "summary": f"Levene W = {stat:.4f}, p = {format_p_value(p_val)}",
+        "significant": p_val < alpha,
+        "method": f"{'Median' if center == 'median' else 'Mean'}-centered Levene test",
+        "summary": f"Levene W = {stat:.4f}, p = {format_p_value(p_val)}, α = {alpha}",
         "note": "方差齐性可接受。" if equal_var else "提示组间方差不齐，后续均值比较建议使用 Welch 或稳健方法。",
         "details": {
             "n_groups": len(group_data),
@@ -441,17 +520,18 @@ def levene_variance_test(df: pd.DataFrame, var: str, group_var: str) -> dict:
     }
 
 
-def anova_oneway(df: pd.DataFrame, var: str, group_var: str, post_hoc: str | None = None) -> dict:
+def anova_oneway(df: pd.DataFrame, var: str, group_var: str, post_hoc: str | None = None, method_params: dict | None = None) -> dict:
     groups = sorted(df[group_var].dropna().unique().tolist())
     if len(groups) < 2:
         return {"error": "方差分析需要至少2组数据"}
     group_data = _numeric_group_data(df, var, group_var, min_per_group=2)
     if len(group_data) < 2:
         return {"error": "有效组数不足2个；每组至少需要2个有效数值观测"}
+    alpha = _pp_alpha(method_params)
     data_list = list(group_data.values())
     try:
         levene_stat, levene_p = stats.levene(*data_list)
-        equal_var = levene_p > 0.05
+        equal_var = levene_p > alpha
     except Exception:
         levene_stat, levene_p, equal_var = None, None, False
     f_stat, p_val = stats.f_oneway(*data_list)
@@ -471,9 +551,9 @@ def anova_oneway(df: pd.DataFrame, var: str, group_var: str, post_hoc: str | Non
         "test_name": "单因素方差分析 (One-way ANOVA)",
         "statistic": round(float(f_stat), 4),
         "p_value": round(float(p_val), 6),
-        "significant": p_val < 0.05,
+        "significant": p_val < alpha,
         "method": "One-way ANOVA",
-        "summary": f"F = {f_stat:.4f}, p = {format_p_value(p_val)}",
+        "summary": f"F = {f_stat:.4f}, p = {format_p_value(p_val)}, α = {alpha}",
         "note": note if note else None,
         "details": {
             "n_groups": len(group_data),
@@ -493,29 +573,39 @@ def anova_oneway(df: pd.DataFrame, var: str, group_var: str, post_hoc: str | Non
     return result
 
 
-def chi_square_test(df: pd.DataFrame, var: str, group_var: str) -> dict:
+def chi_square_test(df: pd.DataFrame, var: str, group_var: str, method_params: dict | None = None) -> dict:
     try:
         contingency = pd.crosstab(df[var], df[group_var])
         if contingency.shape[0] < 2 or contingency.shape[1] < 2:
             return {"error": "列联表维度不足，请确保两个分类变量各有至少2个类别"}
+        alpha = _pp_alpha(method_params)
+        correction_mode = _pp(method_params, "correction", "auto")
         chi2, p_val, dof, expected = stats.chi2_contingency(contingency)
         min_expected = np.min(expected)
         n_cells_lt5 = int(np.sum(expected < 5))
         total_cells = int(expected.size)
         use_fisher_note = ""
         method = "Pearson卡方检验"
-        if contingency.shape == (2, 2) and (min_expected < 1 or n_cells_lt5 / total_cells > 0.2):
-            chi2, p_val = stats.chi2_contingency(contingency, correction=True)[:2]
-            method = "Pearson卡方检验（Yates连续性校正）"
-            use_fisher_note = "超过20%单元格期望频数<5或最小期望频数<1，已使用Yates校正。建议同时参考Fisher精确概率法。"
+        correction_applied = False
+        if contingency.shape == (2, 2):
+            if correction_mode == "yes" or (
+                correction_mode == "auto"
+                and (min_expected < 1 or n_cells_lt5 / total_cells > 0.2)
+            ):
+                chi2, p_val = stats.chi2_contingency(contingency, correction=True)[:2]
+                method = "Pearson卡方检验（Yates连续性校正）"
+                correction_applied = True
+                use_fisher_note = "超过20%单元格期望频数<5或最小期望频数<1，已使用Yates校正。建议同时参考Fisher精确概率法。"
+            elif correction_mode == "no":
+                method = "Pearson卡方检验（不校正）"
         return {
             "test_type": "chi_square",
             "test_name": "卡方检验 (Chi-square test)",
             "statistic": round(float(chi2), 4),
             "p_value": round(float(p_val), 6),
-            "significant": p_val < 0.05,
+            "significant": p_val < alpha,
             "method": method,
-            "summary": f"χ² = {chi2:.4f}, df = {dof}, p = {format_p_value(p_val)}",
+            "summary": f"χ² = {chi2:.4f}, df = {dof}, p = {format_p_value(p_val)}, α = {alpha}",
             "note": use_fisher_note if use_fisher_note else None,
             "details": {
                 "degrees_of_freedom": int(dof),
@@ -533,9 +623,10 @@ def chi_square_test(df: pd.DataFrame, var: str, group_var: str) -> dict:
         return {"error": f"卡方检验计算失败: {str(e)}"}
 
 
-def fisher_exact_test(df: pd.DataFrame, var: str, group_var: str) -> dict:
+def fisher_exact_test(df: pd.DataFrame, var: str, group_var: str, method_params: dict | None = None) -> dict:
     try:
         contingency = pd.crosstab(df[var], df[group_var])
+        alpha = _pp_alpha(method_params)
         if contingency.shape == (2, 2):
             odds_ratio, p_val = stats.fisher_exact(contingency)
             return {
@@ -543,9 +634,9 @@ def fisher_exact_test(df: pd.DataFrame, var: str, group_var: str) -> dict:
                 "test_name": "Fisher精确概率法 (Fisher's exact test)",
                 "statistic": round(float(odds_ratio), 4),
                 "p_value": round(float(p_val), 6),
-                "significant": p_val < 0.05,
+                "significant": odds_ratio != 1.0 and p_val < alpha,
                 "method": "Fisher's exact test (2×2)",
-                "summary": f"OR = {odds_ratio:.4f}, p = {format_p_value(p_val)}",
+                "summary": f"OR = {odds_ratio:.4f}, p = {format_p_value(p_val)}, α = {alpha}",
                 "details": {"odds_ratio": round(float(odds_ratio), 4), "contingency_table": {"rows": contingency.index.tolist(), "cols": contingency.columns.tolist(), "data": contingency.values.tolist()}},
                 "descriptive_stats": _group_descriptive(df, var, group_var),
                 "chart_data": _build_contingency_chart(contingency, var, group_var),
@@ -559,9 +650,9 @@ def fisher_exact_test(df: pd.DataFrame, var: str, group_var: str) -> dict:
                     "test_name": "Fisher精确概率法（扩展）",
                     "statistic": None,
                     "p_value": round(float(result[1]), 6),
-                    "significant": result[1] < 0.05,
+                    "significant": result[1] < alpha,
                     "method": "Fisher-Freeman-Halton扩展",
-                    "summary": f"p = {format_p_value(result[1])}",
+                    "summary": f"p = {format_p_value(result[1])}, α = {alpha}",
                     "note": f"表格维度为{contingency.shape}，使用似然比卡方近似。对非2×2表建议使用卡方检验。",
                     "details": {"contingency_table": {"rows": contingency.index.tolist(), "cols": contingency.columns.tolist(), "data": contingency.values.tolist()}},
                     "descriptive_stats": _group_descriptive(df, var, group_var),
@@ -574,7 +665,7 @@ def fisher_exact_test(df: pd.DataFrame, var: str, group_var: str) -> dict:
         return {"error": f"Fisher精确概率法计算失败: {str(e)}"}
 
 
-def mann_whitney_u_test(df: pd.DataFrame, var: str, group_var: str) -> dict:
+def mann_whitney_u_test(df: pd.DataFrame, var: str, group_var: str, method_params: dict | None = None) -> dict:
     groups = sorted(df[group_var].dropna().unique().tolist())
     if len(groups) != 2:
         return {"error": f"Mann-Whitney U检验需要2组，当前有{len(groups)}组"}
@@ -582,15 +673,17 @@ def mann_whitney_u_test(df: pd.DataFrame, var: str, group_var: str) -> dict:
     b = _numeric_series(df.loc[df[group_var] == groups[1], var]).dropna().to_numpy(dtype=float)
     if len(a) < 2 or len(b) < 2:
         return {"error": "Mann-Whitney U检验每组至少需要2个有效数值观测"}
-    u_stat, p_val = stats.mannwhitneyu(a, b, alternative="two-sided")
+    alpha = _pp_alpha(method_params)
+    alternative = _pp_alt(method_params)
+    u_stat, p_val = stats.mannwhitneyu(a, b, alternative=alternative)
     return {
         "test_type": "mann_whitney",
         "test_name": "Mann-Whitney U检验 (Wilcoxon秩和检验)",
         "statistic": round(float(u_stat), 4),
         "p_value": round(float(p_val), 6),
-        "significant": p_val < 0.05,
+        "significant": p_val < alpha,
         "method": "Mann-Whitney U test",
-        "summary": f"U = {u_stat:.4f}, p = {format_p_value(p_val)}",
+        "summary": f"U = {u_stat:.4f}, p = {format_p_value(p_val)}, α = {alpha}",
         "details": {
             "group_1": {"name": str(groups[0]), "n": int(len(a)), "median": round(float(np.median(a)), 3), "q1": round(float(np.quantile(a, 0.25)), 3), "q3": round(float(np.quantile(a, 0.75)), 3)},
             "group_2": {"name": str(groups[1]), "n": int(len(b)), "median": round(float(np.median(b)), 3), "q1": round(float(np.quantile(b, 0.25)), 3), "q3": round(float(np.quantile(b, 0.75)), 3)},
@@ -601,13 +694,14 @@ def mann_whitney_u_test(df: pd.DataFrame, var: str, group_var: str) -> dict:
     }
 
 
-def kruskal_wallis_test(df: pd.DataFrame, var: str, group_var: str, post_hoc: str | None = None) -> dict:
+def kruskal_wallis_test(df: pd.DataFrame, var: str, group_var: str, post_hoc: str | None = None, method_params: dict | None = None) -> dict:
     groups = sorted(df[group_var].dropna().unique().tolist())
     if len(groups) < 2:
         return {"error": "Kruskal-Wallis检验需要至少2组数据"}
     group_data = _numeric_group_data(df, var, group_var, min_per_group=2)
     if len(group_data) < 2:
         return {"error": "有效组数不足2个；每组至少需要2个有效数值观测"}
+    alpha = _pp_alpha(method_params)
     data_list = list(group_data.values())
     h_stat, p_val = stats.kruskal(*data_list)
     result = {
@@ -615,9 +709,9 @@ def kruskal_wallis_test(df: pd.DataFrame, var: str, group_var: str, post_hoc: st
         "test_name": "Kruskal-Wallis H检验 (秩和检验)",
         "statistic": round(float(h_stat), 4),
         "p_value": round(float(p_val), 6),
-        "significant": p_val < 0.05,
+        "significant": p_val < alpha,
         "method": "Kruskal-Wallis H test",
-        "summary": f"H = {h_stat:.4f}, p = {format_p_value(p_val)}",
+        "summary": f"H = {h_stat:.4f}, p = {format_p_value(p_val)}, α = {alpha}",
         "details": {
             "n_groups": len(group_data),
             "total_n": int(sum(len(v) for v in data_list)),
@@ -651,7 +745,7 @@ def kruskal_wallis_test(df: pd.DataFrame, var: str, group_var: str, post_hoc: st
     return result
 
 
-def wilcoxon_signed_rank_test(df: pd.DataFrame, var: str, paired_var: str) -> dict:
+def wilcoxon_signed_rank_test(df: pd.DataFrame, var: str, paired_var: str, method_params: dict | None = None) -> dict:
     df_clean = pd.DataFrame({
         var: _numeric_series(df[var]),
         paired_var: _numeric_series(df[paired_var]),
@@ -660,8 +754,10 @@ def wilcoxon_signed_rank_test(df: pd.DataFrame, var: str, paired_var: str) -> di
     b = df_clean[paired_var].values
     if len(a) < 5:
         return {"error": "配对样本量不足（需要至少5对完整数据）"}
+    alpha = _pp_alpha(method_params)
+    alternative = _pp_alt(method_params)
     try:
-        w_stat, p_val = stats.wilcoxon(a, b, alternative="two-sided")
+        w_stat, p_val = stats.wilcoxon(a, b, alternative=alternative)
     except Exception as e:
         return {"error": f"Wilcoxon符号秩检验计算失败: {str(e)}"}
     diffs = a - b
@@ -670,9 +766,9 @@ def wilcoxon_signed_rank_test(df: pd.DataFrame, var: str, paired_var: str) -> di
         "test_name": "Wilcoxon符号秩检验 (配对秩和检验)",
         "statistic": round(float(w_stat), 4),
         "p_value": round(float(p_val), 6),
-        "significant": p_val < 0.05,
+        "significant": p_val < alpha,
         "method": "Wilcoxon signed-rank test",
-        "summary": f"W = {w_stat:.4f}, p = {format_p_value(p_val)}",
+        "summary": f"W = {w_stat:.4f}, p = {format_p_value(p_val)}, α = {alpha}",
         "details": {
             "n_pairs": int(len(a)),
             "n_positive_diffs": int(np.sum(diffs > 0)),
@@ -688,10 +784,16 @@ def wilcoxon_signed_rank_test(df: pd.DataFrame, var: str, paired_var: str) -> di
     }
 
 
-def mcnemar_test(df: pd.DataFrame, var: str, paired_var: str, continuity_correction: bool = True) -> dict:
+def mcnemar_test(df: pd.DataFrame, var: str, paired_var: str, continuity_correction: bool = True, method_params: dict | None = None) -> dict:
     df_clean = df[[var, paired_var]].dropna()
     if len(df_clean) == 0:
         return {"error": "无有效配对数据"}
+    # Override continuity_correction from params if provided
+    if method_params:
+        cc = _pp(method_params, "continuity_correction")
+        if cc is not None:
+            continuity_correction = str(cc).lower() == "true"
+    alpha = _pp_alpha(method_params)
     all_cats = sorted(set(df_clean[var].dropna().unique().tolist() + df_clean[paired_var].dropna().unique().tolist()))
     if len(all_cats) == 2:
         b = int(((df_clean[var] == all_cats[0]) & (df_clean[paired_var] == all_cats[1])).sum())
@@ -710,7 +812,7 @@ def mcnemar_test(df: pd.DataFrame, var: str, paired_var: str, continuity_correct
             "test_name": "McNemar检验 (配对分类资料)",
             "statistic": round(float(chi2_stat), 4) if chi2_stat is not None else None,
             "p_value": round(float(p_val), 6),
-            "significant": p_val < 0.05,
+            "significant": p_val < alpha,
             "method": method_used,
             "summary": f"χ² = {chi2_stat:.4f}, p = {format_p_value(p_val)}" if chi2_stat is not None else f"Exact p = {format_p_value(p_val)}",
             "details": {"discordant_pairs": {"b": int(b), "c": int(c), "total": int(b + c)}, "categories": all_cats},
@@ -736,7 +838,7 @@ def mcnemar_test(df: pd.DataFrame, var: str, paired_var: str, continuity_correct
                 "test_name": "McNemar-Bowker检验 (配对多分类)",
                 "statistic": round(float(bowker_stat), 4),
                 "p_value": round(float(p_val), 6),
-                "significant": p_val < 0.05,
+                "significant": p_val < alpha,
                 "method": f"McNemar-Bowker对称性检验 (df={df_bowker})",
                 "summary": f"χ² = {bowker_stat:.4f}, df = {df_bowker}, p = {format_p_value(p_val)}",
                 "details": {"k_categories": k, "degrees_of_freedom": df_bowker, "categories": all_cats},
@@ -749,12 +851,13 @@ def mcnemar_test(df: pd.DataFrame, var: str, paired_var: str, continuity_correct
 
 # ═══ Additional Clinical Statistical Methods ═══════════════════
 
-def friedman_test(df: pd.DataFrame, var: str, subject_var: str, group_var: str) -> dict:
+def friedman_test(df: pd.DataFrame, var: str, subject_var: str, group_var: str, method_params: dict | None = None) -> dict:
     """Friedman test for repeated measures (non-parametric one-way RM ANOVA)."""
     if not group_var or group_var not in df.columns:
         return {"error": "Friedman检验需要有效的分组变量"}
     if not subject_var or subject_var not in df.columns:
         return {"error": "Friedman检验需要有效的受试者ID变量"}
+    alpha = _pp_alpha(method_params)
     subjects = df[subject_var].dropna().unique()
     groups = df[group_var].dropna().unique()
     if len(groups) < 2:
@@ -778,7 +881,7 @@ def friedman_test(df: pd.DataFrame, var: str, subject_var: str, group_var: str) 
             "test_name": "Friedman检验 (非参数重复测量)",
             "statistic": round(float(chi2), 4),
             "p_value": round(float(p_val), 6),
-            "significant": p_val < 0.05,
+            "significant": p_val < alpha,
             "method": "Friedman test (non-parametric repeated measures)",
             "summary": f"χ² = {chi2:.4f}, p = {format_p_value(p_val)}",
             "details": {"n_subjects_complete": n_valid, "n_groups": len(groups), "groups": [str(g) for g in groups]},
@@ -789,12 +892,13 @@ def friedman_test(df: pd.DataFrame, var: str, subject_var: str, group_var: str) 
         return {"error": f"Friedman检验计算失败: {str(e)}"}
 
 
-def repeated_measures_anova(df: pd.DataFrame, var: str, subject_var: str, group_var: str, between_var: str | None = None) -> dict:
+def repeated_measures_anova(df: pd.DataFrame, var: str, subject_var: str, group_var: str, between_var: str | None = None, method_params: dict | None = None) -> dict:
     """Repeated measures ANOVA (one-way within, or mixed design)."""
     if not group_var or group_var not in df.columns:
         return {"error": "重复测量方差分析需要有效的组内因素变量"}
     if not subject_var or subject_var not in df.columns:
         return {"error": "重复测量方差分析需要有效的受试者ID变量"}
+    alpha = _pp_alpha(method_params)
     subjects = df[subject_var].dropna().unique()
     groups = df[group_var].dropna().unique()
     if len(groups) < 2:
@@ -855,7 +959,7 @@ def repeated_measures_anova(df: pd.DataFrame, var: str, subject_var: str, group_
             "test_name": "重复测量方差分析 (RM ANOVA)",
             "statistic": round(float(f_stat), 4),
             "p_value": round(float(p_val), 6),
-            "significant": p_val < 0.05,
+            "significant": p_val < alpha,
             "method": "One-way repeated measures ANOVA (with subject blocking)",
             "summary": f"F({int(df_treatment)}, {int(df_error)}) = {f_stat:.4f}, p = {format_p_value(p_val)}",
             "note": "注：此处采用单变量法univariate approach计算RM ANOVA，包含subject效应。未进行球形检验（Mauchly's test）。如需球形校正（Greenhouse-Geisser, Huynh-Feldt）或更完整的分析，建议使用SPSS/R等专业软件。",
@@ -879,7 +983,7 @@ def repeated_measures_anova(df: pd.DataFrame, var: str, subject_var: str, group_
         return {"error": f"重复测量方差分析计算失败: {str(e)}"}
 
 
-def pearson_correlation(df: pd.DataFrame, var1: str, var2: str) -> dict:
+def pearson_correlation(df: pd.DataFrame, var1: str, var2: str, method_params: dict | None = None) -> dict:
     """Pearson correlation coefficient."""
     if var1 not in df.columns or var2 not in df.columns:
         return {"error": "变量不存在于数据集中"}
@@ -890,8 +994,10 @@ def pearson_correlation(df: pd.DataFrame, var1: str, var2: str) -> dict:
     x, y = clean[var1].values.astype(float), clean[var2].values.astype(float)
     if len(x) < 3:
         return {"error": "样本量不足（需要至少3个完整观测）"}
+    alpha = _pp_alpha(method_params)
+    alternative = _pp_alt(method_params)
     try:
-        r, p_val = pearsonr(x, y)
+        r, p_val = pearsonr(x, y, alternative=alternative)
         if p_val < 0.001:
             interpretation = "高度显著相关"
         elif p_val < 0.01:
@@ -905,7 +1011,7 @@ def pearson_correlation(df: pd.DataFrame, var1: str, var2: str) -> dict:
             "test_name": "Pearson线性相关分析",
             "statistic": round(float(r), 4),
             "p_value": round(float(p_val), 6),
-            "significant": p_val < 0.05,
+            "significant": p_val < alpha,
             "method": "Pearson product-moment correlation",
             "summary": f"r = {r:.4f}, p = {format_p_value(p_val)}",
             "note": interpretation,
@@ -917,7 +1023,7 @@ def pearson_correlation(df: pd.DataFrame, var1: str, var2: str) -> dict:
         return {"error": f"Pearson相关计算失败: {str(e)}"}
 
 
-def spearman_correlation(df: pd.DataFrame, var1: str, var2: str) -> dict:
+def spearman_correlation(df: pd.DataFrame, var1: str, var2: str, method_params: dict | None = None) -> dict:
     """Spearman rank correlation coefficient."""
     if var1 not in df.columns or var2 not in df.columns:
         return {"error": "变量不存在于数据集中"}
@@ -928,6 +1034,7 @@ def spearman_correlation(df: pd.DataFrame, var1: str, var2: str) -> dict:
     x, y = clean[var1].values.astype(float), clean[var2].values.astype(float)
     if len(x) < 3:
         return {"error": "样本量不足（需要至少3个完整观测）"}
+    alpha = _pp_alpha(method_params)
     try:
         rho, p_val = spearmanr(x, y)
         return {
@@ -935,7 +1042,7 @@ def spearman_correlation(df: pd.DataFrame, var1: str, var2: str) -> dict:
             "test_name": "Spearman秩相关分析",
             "statistic": round(float(rho), 4),
             "p_value": round(float(p_val), 6),
-            "significant": p_val < 0.05,
+            "significant": p_val < alpha,
             "method": "Spearman rank correlation",
             "summary": f"ρ = {rho:.4f}, p = {format_p_value(p_val)}",
             "details": {"n": int(len(x)), "variable_1": var1, "variable_2": var2},
@@ -946,10 +1053,11 @@ def spearman_correlation(df: pd.DataFrame, var1: str, var2: str) -> dict:
         return {"error": f"Spearman相关计算失败: {str(e)}"}
 
 
-def log_rank_test(df: pd.DataFrame, time_var: str, event_var: str, group_var: str) -> dict:
+def log_rank_test(df: pd.DataFrame, time_var: str, event_var: str, group_var: str, method_params: dict | None = None) -> dict:
     """Log-rank test for survival analysis with KM curve data and multi-group support."""
     if not group_var or group_var not in df.columns:
         return {"error": "Log-rank检验需要有效的分组变量"}
+    alpha = _pp_alpha(method_params)
     groups = sorted(df[group_var].dropna().unique().tolist())
     if len(groups) < 2:
         return {"error": "Log-rank检验需要至少2组"}
@@ -1136,6 +1244,7 @@ def discriminant_analysis(
     outcome_var: str,
     predictor_vars: list[str],
     method: str = "lda",
+    method_params: dict | None = None,
 ) -> dict:
     """Linear or quadratic discriminant analysis for categorical outcomes."""
     if not outcome_var or outcome_var not in df.columns:
@@ -1200,12 +1309,21 @@ def discriminant_analysis(
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
 
+        # Extract params for QDA/LDA
+        reg_param = float(_pp(method_params, "reg_param", 0.2))
+        rand_state = int(_pp(method_params, "random_state", 42))
+        cv_folds_str = _pp(method_params, "cv_folds", "5")
+        try:
+            cv_folds = int(cv_folds_str)
+        except (ValueError, TypeError):
+            cv_folds = 5
+
         # Try fitting with QDA, fall back to LDA if QDA fails (singular covariance)
         if method_key == "qda":
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    estimator = QuadraticDiscriminantAnalysis(reg_param=0.2)
+                    estimator = QuadraticDiscriminantAnalysis(reg_param=reg_param)
                     estimator.fit(X_scaled, y)
                     y_pred = estimator.predict(X_scaled)
             except Exception as qda_err:
@@ -1228,8 +1346,8 @@ def discriminant_analysis(
         baseline_accuracy = float(np.max(np.bincount(y)) / len(y))
         min_class_n = int(np.min(np.bincount(y)))
         cv_accuracy = None
-        if min_class_n >= 2:
-            folds = min(5, min_class_n)
+        if min_class_n >= cv_folds:
+            folds = min(cv_folds, min_class_n)
             if folds >= 2:
                 cv_estimator = (
                     QuadraticDiscriminantAnalysis(reg_param=0.2)
@@ -1237,7 +1355,7 @@ def discriminant_analysis(
                     else LinearDiscriminantAnalysis(solver="svd")
                 )
                 pipeline = make_pipeline(StandardScaler(), cv_estimator)
-                splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=42)
+                splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=rand_state)
                 try:
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
@@ -1365,7 +1483,7 @@ def discriminant_analysis(
         return {"error": f"判别分析计算失败: {str(e)}"}
 
 
-def logistic_regression(df: pd.DataFrame, outcome_var: str, predictor_vars: list[str]) -> dict:
+def logistic_regression(df: pd.DataFrame, outcome_var: str, predictor_vars: list[str], method_params: dict | None = None) -> dict:
     """Simple logistic regression (univariate or multivariate)."""
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import LabelEncoder, StandardScaler
@@ -1374,6 +1492,9 @@ def logistic_regression(df: pd.DataFrame, outcome_var: str, predictor_vars: list
         return {"error": "Logistic回归需要有效的二分类结局变量"}
     if not predictor_vars:
         return {"error": "Logistic回归需要至少1个预测变量"}
+    max_iter = int(_pp(method_params, "max_iter", 2000))
+    C_val = float(_pp(method_params, "C", 1.0))
+    random_state = int(_pp(method_params, "random_state", 42))
     y_raw, X_design, requested_predictors, numeric_predictors, encoded_predictors, skipped_predictors = _prepare_model_features(
         df,
         outcome_var,
@@ -1404,7 +1525,7 @@ def logistic_regression(df: pd.DataFrame, outcome_var: str, predictor_vars: list
         # Standardize predictors
         scaler = StandardScaler()
         X = scaler.fit_transform(X_raw)
-        model = LogisticRegression(max_iter=2000, solver='lbfgs')
+        model = LogisticRegression(max_iter=max_iter, solver='lbfgs', C=C_val, random_state=random_state)
         model.fit(X, y)
         coefs = {var: round(float(c), 4) for var, c in zip(encoded_predictors, model.coef_[0])}
         ors = {var: round(float(np.exp(c)), 4) for var, c in zip(encoded_predictors, model.coef_[0])}
@@ -1436,14 +1557,14 @@ def logistic_regression(df: pd.DataFrame, outcome_var: str, predictor_vars: list
                 "encoded_predictors": encoded_predictors,
                 "skipped_predictors": skipped_predictors,
             },
-            "chart_data": None,
+            "chart_data": _build_model_chart_data(clean, outcome_var, encoded_predictors, coefs, 'logistic'),
             "post_hoc": None,
         }
     except Exception as e:
         return {"error": f"Logistic回归计算失败: {str(e)}"}
 
 
-def linear_regression(df: pd.DataFrame, y_var: str, x_vars: list[str]) -> dict:
+def linear_regression(df: pd.DataFrame, y_var: str, x_vars: list[str], method_params: dict | None = None) -> dict:
     """Multiple linear regression."""
     from sklearn.linear_model import LinearRegression
     from sklearn.preprocessing import StandardScaler
@@ -1508,19 +1629,20 @@ def linear_regression(df: pd.DataFrame, y_var: str, x_vars: list[str]) -> dict:
                 "encoded_predictors": encoded_predictors,
                 "skipped_predictors": skipped_predictors,
             },
-            "chart_data": None,
+            "chart_data": _build_model_chart_data(clean, y_var, encoded_predictors, coefs, 'linear'),
             "post_hoc": None,
         }
     except Exception as e:
         return {"error": f"线性回归计算失败: {str(e)}"}
 
 
-def ancova(df: pd.DataFrame, var: str, group_var: str, covar: str) -> dict:
+def ancova(df: pd.DataFrame, var: str, group_var: str, covar: str, method_params: dict | None = None) -> dict:
     """ANCOVA (Analysis of Covariance) simplified."""
     if not group_var or group_var not in df.columns:
         return {"error": "ANCOVA需要一个有效的分组变量"}
     if not covar or covar not in df.columns:
         return {"error": "ANCOVA需要一个有效的协变量"}
+    alpha = _pp_alpha(method_params)
     clean = df[[var, group_var, covar]].copy()
     clean[var] = _numeric_series(clean[var])
     clean[covar] = _numeric_series(clean[covar])
@@ -1585,7 +1707,7 @@ def ancova(df: pd.DataFrame, var: str, group_var: str, covar: str) -> dict:
             "test_name": "协方差分析 (ANCOVA)",
             "statistic": round(float(f_stat), 4),
             "p_value": round(float(p_val), 6),
-            "significant": p_val < 0.05,
+            "significant": p_val < alpha,
             "method": "ANCOVA (协方差分析)",
             "summary": f"F({df1},{max(df2,1)}) = {f_stat:.4f}, p = {format_p_value(p_val)}",
             "note": f"校正协变量: {covar}。此为简化近似计算，正式发表建议使用SPSS/R等专业软件。",
@@ -1730,6 +1852,41 @@ def _build_contingency_chart(contingency: pd.DataFrame, var: str, group_var: str
     return {"chart_type": "bar_grouped", "categories": contingency.columns.tolist(), "series": [{"name": str(idx), "values": [int(v) for v in row]} for idx, row in zip(contingency.index, contingency.values.tolist())], "x_label": str(group_var), "y_label": "Count", "title": f"{var} × {group_var} 列联图"}
 
 
+def _build_model_chart_data(df: pd.DataFrame, y_var: str, predictors: list[str], coefs: dict, model_type: str) -> dict:
+    """Build chart data for regression models (logistic/linear)."""
+    try:
+        import numpy as np
+        chart_data = {"chart_type": "model_coefficients", "predictors": predictors, "coefs": coefs, "y_var": str(y_var), "model_type": model_type}
+
+        # Add actual-vs-predicted or coefficient bar chart data
+        numeric_preds = [p for p in predictors if p in df.columns and pd.api.types.is_numeric_dtype(df[p])]
+        if len(numeric_preds) >= 2:
+            # Pick first 2 numeric predictors for a scatter with outcome
+            x_var = numeric_preds[0]
+            y_vals = pd.to_numeric(df[y_var], errors="coerce").dropna()
+            x_vals = pd.to_numeric(df[x_var], errors="coerce")
+            mask = x_vals.notna() & pd.to_numeric(df[y_var], errors="coerce").notna()
+            if mask.sum() >= 5:
+                chart_data["scatter"] = {
+                    "x_var": x_var,
+                    "y_var": y_var,
+                    "x_values": x_vals[mask].tolist(),
+                    "y_values": pd.to_numeric(df[y_var], errors="coerce")[mask].tolist(),
+                }
+
+        # Build coefficient bar chart
+        if coefs:
+            chart_data["coefs_bar"] = {
+                "names": list(coefs.keys()),
+                "values": list(coefs.values()),
+                "title": f"{'Logistic' if model_type == 'logistic' else 'Linear'} 回归标准化系数"
+            }
+
+        return chart_data
+    except Exception:
+        return None
+
+
 def _run_post_hoc(df: pd.DataFrame, var: str, group_var: str, method: str, equal_var: bool, groups: list) -> list[dict]:
     results = []
     if method == "tukey":
@@ -1764,7 +1921,7 @@ def _run_post_hoc(df: pd.DataFrame, var: str, group_var: str, method: str, equal
             b = _numeric_series(df.loc[df[group_var] == g2, var]).dropna().to_numpy(dtype=float)
             try:
                 t_stat, p_val = stats.ttest_ind(a, b, equal_var=equal_var)
-                results.append({"comparison": f"{g1} vs {g2}", "mean_diff": round(float(np.mean(a) - np.mean(b)), 4), "p_value": round(float(p_val), 6), "significant": p_val < 0.05, "method": "LSD"})
+                results.append({"comparison": f"{g1} vs {g2}", "mean_diff": round(float(np.mean(a) - np.mean(b)), 4), "p_value": round(float(p_val), 6), "significant": p_val < alpha, "method": "LSD"})
             except Exception as e:
                 results.append({"comparison": f"{g1} vs {g2}", "error": str(e), "method": "LSD"})
     elif method == "games_howell":
@@ -1781,7 +1938,7 @@ def _run_post_hoc(df: pd.DataFrame, var: str, group_var: str, method: str, equal
                 df_den = (var1 / n1) ** 2 / (n1 - 1) + (var2 / n2) ** 2 / (n2 - 1)
                 df_welch = df_num / df_den
                 p_val = 2 * stats.t.sf(abs(t_stat), df_welch)
-                results.append({"comparison": f"{g1} vs {g2}", "mean_diff": round(float(np.mean(a) - np.mean(b)), 4), "p_value": round(float(p_val), 6), "significant": p_val < 0.05, "method": "Games-Howell"})
+                results.append({"comparison": f"{g1} vs {g2}", "mean_diff": round(float(np.mean(a) - np.mean(b)), 4), "p_value": round(float(p_val), 6), "significant": p_val < alpha, "method": "Games-Howell"})
             except Exception as e:
                 results.append({"comparison": f"{g1} vs {g2}", "error": str(e), "method": "Games-Howell"})
     return results

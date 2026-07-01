@@ -291,6 +291,98 @@ function getTestDefaultParams(testId) {
   return defaults[testId] || {};
 }
 
+/* ── Parameter definitions for all test types ────────────── */
+function getTestParams(testId) {
+  const paramDefs = {
+    t_test_independent: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+      { key: 'alternative', label: '备择假设', type: 'select', default: 'two-sided', options: ['two-sided', 'less', 'greater'] },
+      { key: 'equal_var', label: '方差齐性假设', type: 'select', default: 'False', options: ['False', 'True'], note: 'False=Welch校正(推荐), True=Student t' },
+    ],
+    t_test_paired: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+      { key: 'alternative', label: '备择假设', type: 'select', default: 'two-sided', options: ['two-sided', 'less', 'greater'] },
+    ],
+    one_sample_t_test: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+      { key: 'alternative', label: '备择假设', type: 'select', default: 'two-sided', options: ['two-sided', 'less', 'greater'] },
+      { key: 'hypothesized_mean', label: '参考均值 μ₀', type: 'number', default: '0.0' },
+    ],
+    normality_test: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+    ],
+    levene_test: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+      { key: 'center', label: '中心化方法', type: 'select', default: 'median', options: ['median', 'mean'], note: 'median=Brown-Forsythe推荐' },
+    ],
+    anova: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+    ],
+    repeated_measures_anova: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+    ],
+    ancova: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+    ],
+    mann_whitney: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+      { key: 'alternative', label: '备择假设', type: 'select', default: 'two-sided', options: ['two-sided', 'less', 'greater'] },
+    ],
+    kruskal_wallis: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+    ],
+    wilcoxon_signed_rank: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+      { key: 'alternative', label: '备择假设', type: 'select', default: 'two-sided', options: ['two-sided', 'less', 'greater'] },
+    ],
+    friedman: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+    ],
+    chi_square: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+      { key: 'correction', label: '连续性校正', type: 'select', default: 'auto', options: ['auto', 'yes', 'no'], note: 'auto=自动判断' },
+    ],
+    fisher_exact: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+    ],
+    mcnemar: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+      { key: 'continuity_correction', label: '连续性校正', type: 'select', default: 'True', options: ['True', 'False'] },
+    ],
+    pearson_correlation: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+      { key: 'alternative', label: '备择假设', type: 'select', default: 'two-sided', options: ['two-sided', 'less', 'greater'] },
+    ],
+    spearman_correlation: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+      { key: 'alternative', label: '备择假设', type: 'select', default: 'two-sided', options: ['two-sided', 'less', 'greater'] },
+    ],
+    log_rank: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+    ],
+    logistic_regression: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+      { key: 'random_state', label: '随机种子', type: 'number', default: '42' },
+      { key: 'max_iter', label: '最大迭代次数', type: 'number', default: '2000' },
+      { key: 'C', label: '正则化强度 C', type: 'number', default: '1.0', note: 'C越大正则化越弱' },
+    ],
+    linear_regression: [
+      { key: 'alpha', label: '显著性水平 α', type: 'select', default: '0.05', options: ['0.01', '0.05', '0.10'] },
+      { key: 'random_state', label: '随机种子', type: 'number', default: '42' },
+    ],
+    discriminant_analysis: [
+      { key: 'random_state', label: '随机种子', type: 'number', default: '42' },
+      { key: 'cv_folds', label: '交叉验证折数', type: 'select', default: '5', options: ['3', '5', '10'] },
+    ],
+    quadratic_discriminant_analysis: [
+      { key: 'random_state', label: '随机种子', type: 'number', default: '42' },
+      { key: 'reg_param', label: '正则化参数', type: 'number', default: '0.2', note: 'QDA协方差矩阵正则化' },
+      { key: 'cv_folds', label: '交叉验证折数', type: 'select', default: '5', options: ['3', '5', '10'] },
+    ],
+  };
+  return paramDefs[testId] || [];
+}
+
 /* ── Statistical Analysis Execution ───────────────────── */
 async function runAnalysis() {
   const config = getTestConfig(STATE.activeChartType);
@@ -363,6 +455,8 @@ function buildAnalysisRequest(config) {
     dataset_name: STATE.datasetName || 'comprehensive_example',
     upload_id: STATE.uploadId || null,
     sheet_name: STATE.activeSheet || null,
+    // Include method params for parameter tuning
+    params: STATE.methodParams || {},
   };
 
   if (config.requiresGroup) {
